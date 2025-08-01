@@ -26,6 +26,37 @@
 #include "external/volk/volk.h"
 
 #include "external/cglm/include/cglm/cglm.h"
+
+// Nuklear GUI includes
+
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#define NK_INCLUDE_FIXED_TYPES
+#define NK_INCLUDE_STANDARD_IO
+#define NK_INCLUDE_STANDARD_VARARGS
+#define NK_INCLUDE_DEFAULT_ALLOCATOR
+#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
+#define NK_INCLUDE_FONT_BAKING
+#define NK_INCLUDE_DEFAULT_FONT
+#define NK_IMPLEMENTATION
+#define NK_GLFW_VULKAN_IMPLEMENTATION
+
+#include "external/nuklear/nuklear.h"
+
+#include "external/nuklear/demo/glfw_vulkan/nuklear_glfw_vulkan.h"
+
+#define GLFW_EXPOSE_NATIVE_X11
+#define GLFW_EXPOSE_NATIVE_WAYLAND
+#include <GLFW/glfw3native.h>
+
+
+
+
+
+
+
+
 #define u32 uint32_t
 #define VK_CHECK(call) \
 	do \
