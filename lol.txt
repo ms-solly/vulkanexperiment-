@@ -1,0 +1,8 @@
+u32 findGraphicsQueueFamilyIndex(VkPhysicalDevice device);
+
+VkDevice createLogicalDevice(VkPhysicalDevice device, u32 queueFamilyIndex);
+
+VkSurfaceKHR createSurface(VkInstance instance, GLFWwindow* window);
+
+VkPhysicalDeviceMemoryProperties getDeviceMemoryProperties(VkPhysicalDevice device);
+
