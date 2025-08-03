@@ -3,16 +3,18 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+// #include<signal.h>
+
 #define _USE_MATH_DEFINES
 #include <math.h>
 #define STB_DS_IMPLEMENTATION
-#include "stb/stb_ds.h"
+#include "external/stb/stb_ds.h"
 #define VK_NO_PROTOTYPES
 #define VOLK_IMPLEMENTATION
 #define GLFW_INCLUDE_VULKAN
 #define STB_IMAGE_IMPLEMENTATION
 
-#include "stb/stb_image.h"
+#include "external/stb/stb_image.h"
 
 #include <GLFW/glfw3.h>
 #define CGLTF_IMPLEMENTATION
@@ -50,8 +52,14 @@
 #define GLFW_EXPOSE_NATIVE_WAYLAND
 #include <GLFW/glfw3native.h>
 
-
-
+/*
+#define PANIC(ERROR, FORMAT, ...){                                                                                                  /
+  if(ERROR){                                                                                                                        /
+	fprintf(stderr,"%s -> %s -> %i -> Error(%i):\n\t" FORMAT "\n", __FINE_NAME__, __FUNCTION__, __LINE__, ERROR, ##__VA_ARGS__);/
+	raise(SIGABRT);                                                                                                             /
+  }                                                                                                                                 /
+}                                                                                                                                    
+*/
 
 
 
@@ -130,10 +138,12 @@ typedef struct Mesh
 	char* texture_path;
 } Mesh;
 
+#define MAX_FRAMES_IN_FLIGHT 2
+
 typedef struct Application
 {
 	GLFWwindow* window;
-	int width, height;
+	int32_t width, height;
 	bool framebufferResized;
 
 	// Camera
@@ -208,11 +218,12 @@ typedef struct Application
 	uint32_t numActiveLights;
 
 	// Sync objects
-	VkSemaphore* imageAvailableSemaphores; // Per frame in flight
-	VkSemaphore* renderFinishedSemaphores; // Per swapchain image
-	VkFence* inFlightFences;               // Per frame in flight
+
+	VkSemaphore imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT]; // Per frame in flight
+	VkSemaphore renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT]; // Per frame in flight
+	VkFence inFlightFences[MAX_FRAMES_IN_FLIGHT];               // Per frame in flight
 	uint32_t currentFrame;
-	uint32_t MAX_FRAMES_IN_FLIGHT;
+
 } Application;
 
 // --- Memory/Buffer Helpers ---
@@ -417,7 +428,7 @@ void generateMipmaps(Application* app, VkCommandBuffer commandBuffer, VkImage im
 
 void createTextureImage(Application* app, const char* path, Texture* outTexture, u32* outMipLevels)
 {
-	int texWidth, texHeight, texChannels;
+	uint32_t texWidth, texHeight, texChannels;
 	stbi_uc* pixels = stbi_load(path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 	VkDeviceSize imageSize = texWidth * texHeight * 4;
 
@@ -535,24 +546,23 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels)
 {
 	VkPhysicalDeviceProperties properties = {0};
 	vkGetPhysicalDeviceProperties(app->physicalDevice, &properties);
-
 	VkSamplerCreateInfo samplerInfo = {
-	    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-	    .magFilter = VK_FILTER_LINEAR,
-	    .minFilter = VK_FILTER_LINEAR,
-	    .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-	    .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-	    .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-	    .anisotropyEnable = VK_TRUE,
-	    .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-	    .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-	    .unnormalizedCoordinates = VK_FALSE,
-	    .compareEnable = VK_FALSE,
-	    .compareOp = VK_COMPARE_OP_ALWAYS,
-	    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-	    .mipLodBias = 0.0f,
-	    .minLod = 0.0f,
-	    .maxLod = (float)mipLevels,
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+		.anisotropyEnable = VK_TRUE,
+		.maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+		.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+		.unnormalizedCoordinates = VK_FALSE,
+		.compareEnable = VK_FALSE,
+		.compareOp = VK_COMPARE_OP_ALWAYS,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+		.mipLodBias = 0.0f,
+		.minLod = 0.0f,
+		.maxLod = (float)mipLevels,
 	};
 
 	VK_CHECK(vkCreateSampler(app->device, &samplerInfo, NULL, &texture->sampler));
@@ -562,7 +572,7 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels)
 
 void loadGltfModel(const char* path, Mesh* outMesh)
 {
-	cgltf_options options = {0};
+	cgltf_options options = {};
 	cgltf_data* data = NULL;
 	cgltf_result result = cgltf_parse_file(&options, path, &data);
 	if (result != cgltf_result_success)
@@ -935,7 +945,36 @@ VkPhysicalDevice selectPhysicalDevice(VkInstance instance)
 	{
 		VkPhysicalDeviceProperties props;
 		vkGetPhysicalDeviceProperties(physicalDevices[i], &props);
-		printf("GPU%d: %s\n", i, props.deviceName);
+		
+		const char* deviceTypeStr;
+		switch (props.deviceType)
+		{
+		case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+			deviceTypeStr = "Integrated GPU";
+			break;
+		case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+			deviceTypeStr = "Discrete GPU";
+			break;
+		case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+			deviceTypeStr = "Virtual GPU";
+			break;
+		case VK_PHYSICAL_DEVICE_TYPE_CPU:
+			deviceTypeStr = "CPU";
+			break;
+		default:
+			deviceTypeStr = "Other";
+			break;
+		}
+		
+		printf("GPU%d: %s (%s)\n", i, props.deviceName, deviceTypeStr);
+		printf("  Vulkan API: %d.%d.%d\n", 
+			VK_VERSION_MAJOR(props.apiVersion),
+			VK_VERSION_MINOR(props.apiVersion),
+			VK_VERSION_PATCH(props.apiVersion));
+		printf("  Driver: %d.%d.%d\n",
+			VK_VERSION_MAJOR(props.driverVersion),
+			VK_VERSION_MINOR(props.driverVersion),
+			VK_VERSION_PATCH(props.driverVersion));
 
 		if (!discrete && props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
 			discrete = physicalDevices[i];
@@ -953,7 +992,48 @@ VkPhysicalDevice selectPhysicalDevice(VkInstance instance)
 
 	VkPhysicalDeviceProperties props;
 	vkGetPhysicalDeviceProperties(selected, &props);
-	printf("Selected GPU: %s\n", props.deviceName);
+	
+	const char* selectedDeviceTypeStr;
+	switch (props.deviceType)
+	{
+	case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+		selectedDeviceTypeStr = "Integrated GPU";
+		break;
+	case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+		selectedDeviceTypeStr = "Discrete GPU";
+		break;
+	case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+		selectedDeviceTypeStr = "Virtual GPU";
+		break;
+	case VK_PHYSICAL_DEVICE_TYPE_CPU:
+		selectedDeviceTypeStr = "CPU";
+		break;
+	default:
+		selectedDeviceTypeStr = "Other";
+		break;
+	}
+	
+	printf("\n=== SELECTED GPU ===\n");
+	printf("Name: %s\n", props.deviceName);
+	printf("Type: %s\n", selectedDeviceTypeStr);
+	printf("Vendor ID: 0x%X\n", props.vendorID);
+	printf("Device ID: 0x%X\n", props.deviceID);
+	printf("Vulkan API: %d.%d.%d\n", 
+		VK_VERSION_MAJOR(props.apiVersion),
+		VK_VERSION_MINOR(props.apiVersion),
+		VK_VERSION_PATCH(props.apiVersion));
+	printf("Driver: %d.%d.%d\n",
+		VK_VERSION_MAJOR(props.driverVersion),
+		VK_VERSION_MINOR(props.driverVersion),
+		VK_VERSION_PATCH(props.driverVersion));
+	printf("Max Texture Size: %d x %d\n", 
+		props.limits.maxImageDimension2D, 
+		props.limits.maxImageDimension2D);
+	printf("Max Uniform Buffer Size: %u MB\n", 
+		props.limits.maxUniformBufferRange / (1024 * 1024));
+	printf("format: GLFW %s\n",glfwGetVersionString());
+	printf("====================\n\n");
+
 
 	return selected;
 }
@@ -1666,18 +1746,18 @@ void createDescriptors(Application* app)
 
 void createSyncObjects(Application* app)
 {
-	// Allocate imageAvailable semaphores per frame in flight
-	app->imageAvailableSemaphores = malloc(app->MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
-	// Allocate renderFinished semaphores per swapchain image
-	app->renderFinishedSemaphores = malloc(app->swapchainImageCount * sizeof(VkSemaphore));
-	// Allocate fences per frame in flight
-	app->inFlightFences = malloc(app->MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
+	// // Allocate imageAvailable semaphores per frame in flight
+	// app->imageAvailableSemaphores = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
+	// // Allocate renderFinished semaphores per swapchain image
+	// app->renderFinishedSemaphores = malloc(app->swapchainImageCount * sizeof(VkSemaphore));
+	// // Allocate fences per frame in flight
+	// app->inFlightFences = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
 
 	VkSemaphoreCreateInfo semaphoreInfo = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 	VkFenceCreateInfo fenceInfo = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
 
 	// Create imageAvailable semaphores (per frame in flight)
-	for (uint32_t i = 0; i < app->MAX_FRAMES_IN_FLIGHT; i++)
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		VK_CHECK(vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->imageAvailableSemaphores[i]));
 	}
@@ -1689,7 +1769,7 @@ void createSyncObjects(Application* app)
 	}
 
 	// Create fences for each frame in flight
-	for (uint32_t i = 0; i < app->MAX_FRAMES_IN_FLIGHT; i++)
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		VK_CHECK(vkCreateFence(app->device, &fenceInfo, NULL, &app->inFlightFences[i]));
 	}
@@ -1708,12 +1788,12 @@ void createCommandPoolAndBuffer(Application* app, uint32_t queueFamilyIndex)
 	VK_CHECK(vkCreateCommandPool(app->device, &commandPoolInfo, NULL, &app->commandPool));
 
 	// Allocate command buffers (one per frame in flight)
-	app->commandBuffers = malloc(app->MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
+	app->commandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
 	VkCommandBufferAllocateInfo cmdAllocInfo = {
 	    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 	    .commandPool = app->commandPool,
 	    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-	    .commandBufferCount = app->MAX_FRAMES_IN_FLIGHT,
+	    .commandBufferCount = MAX_FRAMES_IN_FLIGHT,
 	};
 	VK_CHECK(vkAllocateCommandBuffers(app->device, &cmdAllocInfo, app->commandBuffers));
 }
@@ -1769,7 +1849,7 @@ void createResources(Application* app)
 void cleanupSyncObjects(Application* app)
 {
 	// Clean up imageAvailable semaphores (per frame in flight)
-	for (uint32_t i = 0; i < app->MAX_FRAMES_IN_FLIGHT; i++)
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		vkDestroySemaphore(app->device, app->imageAvailableSemaphores[i], NULL);
 	}
@@ -1779,7 +1859,7 @@ void cleanupSyncObjects(Application* app)
 		vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
 	}
 	// Clean up fences (per frame in flight)
-	for (uint32_t i = 0; i < app->MAX_FRAMES_IN_FLIGHT; i++)
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		vkDestroyFence(app->device, app->inFlightFences[i], NULL);
 	}
@@ -1900,7 +1980,6 @@ void initVulkan(Application* app)
 	VK_CHECK(volkInitialize());
 
 	// Initialize frame count first
-	app->MAX_FRAMES_IN_FLIGHT = 2;
 	app->currentFrame = 0;
 
 	// Create instance
@@ -2039,14 +2118,14 @@ void drawFrame(Application* app)
 	    .commandBufferCount = 1,
 	    .pCommandBuffers = &commandBuffer,
 	    .signalSemaphoreCount = 1,
-	    .pSignalSemaphores = &app->renderFinishedSemaphores[imageIndex],
+	    .pSignalSemaphores = &app->renderFinishedSemaphores[app->currentFrame],
 	};
 	VK_CHECK(vkQueueSubmit(app->graphicsQueue, 1, &submitInfo, app->inFlightFences[app->currentFrame]));
 
 	VkPresentInfoKHR presentInfo = {
 	    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 	    .waitSemaphoreCount = 1,
-	    .pWaitSemaphores = &app->renderFinishedSemaphores[imageIndex],
+	    .pWaitSemaphores = &app->renderFinishedSemaphores[app->currentFrame],
 	    .swapchainCount = 1,
 	    .pSwapchains = &app->swapchain,
 	    .pImageIndices = &imageIndex,
@@ -2063,7 +2142,7 @@ void drawFrame(Application* app)
 		assert(0 && "failed to present swap chain image!");
 	}
 
-	app->currentFrame = (app->currentFrame + 1) % app->MAX_FRAMES_IN_FLIGHT;
+	app->currentFrame = (app->currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 void mainLoop(Application* app)
