@@ -3,8 +3,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-// #include<signal.h>
-
 #define _USE_MATH_DEFINES
 #include <math.h>
 #define STB_DS_IMPLEMENTATION
@@ -52,14 +50,8 @@
 #define GLFW_EXPOSE_NATIVE_WAYLAND
 #include <GLFW/glfw3native.h>
 
-/*
-#define PANIC(ERROR, FORMAT, ...){                                                                                                  /
-  if(ERROR){                                                                                                                        /
-	fprintf(stderr,"%s -> %s -> %i -> Error(%i):\n\t" FORMAT "\n", __FINE_NAME__, __FUNCTION__, __LINE__, ERROR, ##__VA_ARGS__);/
-	raise(SIGABRT);                                                                                                             /
-  }                                                                                                                                 /
-}                                                                                                                                    
-*/
+
+
 
 
 
@@ -143,7 +135,7 @@ typedef struct Mesh
 typedef struct Application
 {
 	GLFWwindow* window;
-	int32_t width, height;
+	int width, height;
 	bool framebufferResized;
 
 	// Camera
@@ -428,7 +420,7 @@ void generateMipmaps(Application* app, VkCommandBuffer commandBuffer, VkImage im
 
 void createTextureImage(Application* app, const char* path, Texture* outTexture, u32* outMipLevels)
 {
-	uint32_t texWidth, texHeight, texChannels;
+	int texWidth, texHeight, texChannels;
 	stbi_uc* pixels = stbi_load(path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 	VkDeviceSize imageSize = texWidth * texHeight * 4;
 
@@ -546,23 +538,24 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels)
 {
 	VkPhysicalDeviceProperties properties = {0};
 	vkGetPhysicalDeviceProperties(app->physicalDevice, &properties);
+
 	VkSamplerCreateInfo samplerInfo = {
-		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-		.magFilter = VK_FILTER_LINEAR,
-		.minFilter = VK_FILTER_LINEAR,
-		.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-		.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-		.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-		.anisotropyEnable = VK_TRUE,
-		.maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-		.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-		.unnormalizedCoordinates = VK_FALSE,
-		.compareEnable = VK_FALSE,
-		.compareOp = VK_COMPARE_OP_ALWAYS,
-		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-		.mipLodBias = 0.0f,
-		.minLod = 0.0f,
-		.maxLod = (float)mipLevels,
+	    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+	    .magFilter = VK_FILTER_LINEAR,
+	    .minFilter = VK_FILTER_LINEAR,
+	    .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	    .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	    .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+	    .anisotropyEnable = VK_TRUE,
+	    .maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+	    .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+	    .unnormalizedCoordinates = VK_FALSE,
+	    .compareEnable = VK_FALSE,
+	    .compareOp = VK_COMPARE_OP_ALWAYS,
+	    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+	    .mipLodBias = 0.0f,
+	    .minLod = 0.0f,
+	    .maxLod = (float)mipLevels,
 	};
 
 	VK_CHECK(vkCreateSampler(app->device, &samplerInfo, NULL, &texture->sampler));
@@ -572,7 +565,7 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels)
 
 void loadGltfModel(const char* path, Mesh* outMesh)
 {
-	cgltf_options options = {};
+	cgltf_options options = {0};
 	cgltf_data* data = NULL;
 	cgltf_result result = cgltf_parse_file(&options, path, &data);
 	if (result != cgltf_result_success)
@@ -1029,11 +1022,9 @@ VkPhysicalDevice selectPhysicalDevice(VkInstance instance)
 	printf("Max Texture Size: %d x %d\n", 
 		props.limits.maxImageDimension2D, 
 		props.limits.maxImageDimension2D);
-	printf("Max Uniform Buffer Size: %u MB\n", 
+	printf("Max Uniform Buffer Size: %zu MB\n", 
 		props.limits.maxUniformBufferRange / (1024 * 1024));
-	printf("format: GLFW %s\n",glfwGetVersionString());
 	printf("====================\n\n");
-
 
 	return selected;
 }
