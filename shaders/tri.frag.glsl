@@ -25,6 +25,7 @@ layout(binding = 0) uniform UniformBufferObject {
 layout(binding = 1) uniform sampler2D texSampler;
 layout(binding = 3) uniform BaseColorUBO_t { vec4 baseColor; } baseColorUbo;
 layout(binding = 4) uniform HasTextureUBO_t { int hasTexture; } hasTextureUbo;
+layout(binding = 5) uniform AlphaCutoffUBO_t { float alphaCutoff; } alphaCutoffUbo;
 
 layout(location = 0) in vec3 fragWorldPos;
 layout(location = 1) in vec3 fragNormal;
@@ -53,11 +54,22 @@ vec3 calculatePointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewD
 }
 
 void main() {
+    vec4 texColor = vec4(1.0);
     vec3 albedo;
+    float alpha = 1.0;
+    
     if (hasTextureUbo.hasTexture == 1) {
-        albedo = texture(texSampler, fragTexCoord).rgb * fragColor.rgb; // ✅ Use vertex color
+        texColor = texture(texSampler, fragTexCoord);
+        albedo = texColor.rgb * fragColor.rgb; // ✅ Use vertex color
+        alpha = texColor.a * fragColor.a;
     } else {
         albedo = fragColor.rgb; // ✅ Use vertex color
+        alpha = fragColor.a;
+    }
+    
+    // Alpha cutoff test
+    if (alphaCutoffUbo.alphaCutoff > 0.0 && alpha < alphaCutoffUbo.alphaCutoff) {
+        discard;
     }
 
     vec3 normal = normalize(fragNormal);
@@ -71,5 +83,5 @@ void main() {
 
     result += 0.15 * albedo;
 
-    outColor = vec4(result, 1.0);
+    outColor = vec4(result, alpha);
 }

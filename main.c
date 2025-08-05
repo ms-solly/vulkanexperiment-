@@ -102,6 +102,8 @@ typedef struct Material
 	int has_texture;        // Whether this material has a texture
 	int texture_index;      // Index into the textures array (-1 if no texture)
 	char* texture_path;     // Path to texture file
+	float alpha_cutoff;     // Alpha cutoff value for alpha testing
+	int alpha_mode;         // 0 = opaque, 1 = mask, 2 = blend
 } Material;
 
 typedef struct Primitive 
@@ -203,6 +205,7 @@ typedef struct Application
 	// Command pool and buffers
 	Buffer baseColorBuffer;
     Buffer hasTextureBuffer;
+    Buffer alphaCutoffBuffer;
 
 
 	// Pipeline
@@ -804,11 +807,8 @@ void loadGltfModel(const char* path, Mesh* outMesh)
 	cgltf_options options = {0};
 	cgltf_data* data = NULL;
 
-	if (cgltf_parse_file(&options, path, &data) != cgltf_result_success)
-	{
-		fprintf(stderr, "Failed to parse GLTF file: %s\n", path);
-		exit(1);
-	}
+	cgltf_parse_file(&options, path, &data) ;
+
 
 	char* dir_path = NULL;
 	char* last_slash = strrchr(path, '/');
@@ -825,14 +825,8 @@ void loadGltfModel(const char* path, Mesh* outMesh)
 		strcpy(dir_path, "./");
 	}
 
-	if (cgltf_load_buffers(&options, data, dir_path) != cgltf_result_success)
-	{
-		fprintf(stderr, "Failed to load GLTF buffers\n");
-		free(dir_path);
-		cgltf_free(data);
-		exit(1);
-	}
-	
+	cgltf_load_buffers(&options, data, dir_path) ;
+
 	// Initialize mesh
 	memset(outMesh, 0, sizeof(Mesh));
 	
@@ -853,6 +847,18 @@ void loadGltfModel(const char* path, Mesh* outMesh)
 			ourMat->has_texture = 0;
 			ourMat->texture_index = -1;
 			ourMat->texture_path = NULL;
+			ourMat->alpha_cutoff = 0.5f;  // Default alpha cutoff
+			ourMat->alpha_mode = 0;       // Default to opaque
+			
+			// Parse alpha mode and cutoff
+			if (mat->alpha_mode == cgltf_alpha_mode_opaque) {
+				ourMat->alpha_mode = 0;
+			} else if (mat->alpha_mode == cgltf_alpha_mode_mask) {
+				ourMat->alpha_mode = 1;
+				ourMat->alpha_cutoff = mat->alpha_cutoff;
+			} else if (mat->alpha_mode == cgltf_alpha_mode_blend) {
+				ourMat->alpha_mode = 2;
+			}
 			
 			if (mat->has_pbr_metallic_roughness) {
 				cgltf_pbr_metallic_roughness* pbr = &mat->pbr_metallic_roughness;
@@ -990,6 +996,8 @@ void createGroundPlane(Mesh* outMesh)
 	outMesh->materials[0].base_color[3] = 1.0f;
 	outMesh->materials[0].has_texture = 1;
 	outMesh->materials[0].texture_index = 0;
+	outMesh->materials[0].alpha_cutoff = 0.0f;  // No alpha cutoff for ground
+	outMesh->materials[0].alpha_mode = 0;       // Opaque
 	outMesh->materials[0].texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
 	strcpy(outMesh->materials[0].texture_path, "Bark_DeadTree.png");
 	
@@ -1310,6 +1318,12 @@ VkDescriptorSetLayout createDescriptorSetLayout(VkDevice device)
 	        .descriptorCount = 1,
 	        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 	    },
+	    {
+	        .binding = 5,
+	        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+	        .descriptorCount = 1,
+	        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+	    },
 	};
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -1380,7 +1394,7 @@ VkDescriptorSetLayout createGridDescriptorSetLayout(VkDevice device)
 VkDescriptorPool createDescriptorPool(VkDevice device)
 {
 	VkDescriptorPoolSize poolSizes[] = {
-	    {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 200},  // Much more for many materials (26 textures × 3 uniform buffers each + extra)
+	    {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 300},  // Increased for alpha cutoff buffer (26 textures × 4 uniform buffers each + extra)
 	    {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 200}, // Much more for many textures (26 textures × 2 samplers each + extra)
 	};
 
@@ -1853,7 +1867,7 @@ void createSwapchainRelatedResources(Application* app)
 void createModelAndBuffers(Application* app)
 {
 	// Load model
-	loadGltfModel("cookie.gltf", &app->mesh);
+	loadGltfModel("/home/lka/myprojects/vulkantest3/sponza/Sponza.gltf", &app->mesh);
 
 	// Create vertex buffer
 	size_t vertexBufferSize = app->mesh.vertex_count * sizeof(Vertex);
@@ -1967,7 +1981,7 @@ void createUniformBuffer(Application* app)
 	createBuffer(app, &app->uniformBuffer, sizeof(UniformBufferObject), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 	createBuffer(app, &app->baseColorBuffer, sizeof(vec4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     createBuffer(app, &app->hasTextureBuffer, sizeof(int), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-
+    createBuffer(app, &app->alphaCutoffBuffer, sizeof(float), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 }
 
 
@@ -2016,15 +2030,22 @@ void createDescriptors(Application* app)
 			.range = sizeof(int)
 		};
 		
+		VkDescriptorBufferInfo alphaCutoffBufferInfo = {
+			.buffer = app->alphaCutoffBuffer.vkbuffer,
+			.offset = 0,
+			.range = sizeof(float)
+		};
+		
 		VkWriteDescriptorSet descriptorWrites[] = {
 			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 0, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &bufferInfo},
 			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 1, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &imageInfo},
 			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 2, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &gridImageInfo},
 			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 3, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &baseColorBufferInfo},
-			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 4, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &hasTextureBufferInfo}
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 4, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &hasTextureBufferInfo},
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 5, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &alphaCutoffBufferInfo}
 		};
 		
-		vkUpdateDescriptorSets(app->device, 5, descriptorWrites, 0, NULL);
+		vkUpdateDescriptorSets(app->device, 6, descriptorWrites, 0, NULL);
 	}
 	
 	// Legacy single descriptor set support (use first texture)
@@ -2166,6 +2187,7 @@ void cleanupResources(Application* app)
 	destroyBuffer(app->device, &app->gridVertexBuffer);
 	destroyBuffer(app->device, &app->baseColorBuffer);
 	destroyBuffer(app->device, &app->hasTextureBuffer);
+	destroyBuffer(app->device, &app->alphaCutoffBuffer);
 
 	// Clean up multiple textures
 	if (app->textures) {
@@ -2419,6 +2441,9 @@ void recordCommandBuffer(Application* app, VkCommandBuffer commandBuffer, u32 im
 			int hasTexture = mat->has_texture;
 			memcpy(app->hasTextureBuffer.data, &hasTexture, sizeof(int));
 			
+			// Update alpha cutoff buffer
+			memcpy(app->alphaCutoffBuffer.data, &mat->alpha_cutoff, sizeof(float));
+			
 			// Bind the correct descriptor set for this material's texture
 			VkDescriptorSet descriptorSet = app->descriptorSet; // Default
 			if (mat->has_texture && mat->texture_index >= 0 && mat->texture_index < (int)app->texture_count) {
@@ -2429,8 +2454,10 @@ void recordCommandBuffer(Application* app, VkCommandBuffer commandBuffer, u32 im
 			// Use default material
 			vec4 defaultColor = {1.0f, 1.0f, 1.0f, 1.0f};
 			int hasTexture = 0;
+			float defaultAlphaCutoff = 0.0f;
 			memcpy(app->baseColorBuffer.data, defaultColor, sizeof(vec4));
 			memcpy(app->hasTextureBuffer.data, &hasTexture, sizeof(int));
+			memcpy(app->alphaCutoffBuffer.data, &defaultAlphaCutoff, sizeof(float));
 			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipelineLayout, 0, 1, &app->descriptorSet, 0, NULL);
 		}
 		
