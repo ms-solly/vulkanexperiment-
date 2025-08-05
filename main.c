@@ -72,12 +72,13 @@
 
 // --- Core Structures ---
 
-typedef struct Vertex
-{
-	vec3 pos;
-	vec3 normal;
-	vec2 texcoord;
+typedef struct {
+    vec3 pos;
+    vec3 normal;
+    vec2 texcoord;
+    vec4 color; // 👈 Per-vertex color from material
 } Vertex;
+
 
 typedef struct Buffer
 {
@@ -249,6 +250,7 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels);
 void loadGltfModel(const char* path, Mesh* outMesh);
 void createGroundPlane(Mesh* outMesh);
 uint32_t findMemoryType(const VkPhysicalDeviceMemoryProperties* memProperties, uint32_t typeFilter, VkMemoryPropertyFlags properties);
+void checkMaterials(cgltf_data* data);
 
 
 
@@ -617,7 +619,8 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 {
 	mat4 localTransform;
 	glm_mat4_identity(localTransform);
-	cgltf_node_transform_local(node, localTransform);
+	cgltf_node_transform_local(node, (cgltf_float*)localTransform);
+
 	mat4 worldTransform;
 	glm_mat4_mul(parentTransform, localTransform, worldTransform);
 
@@ -629,60 +632,48 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 			uint32_t startVertex = *vertexOffset;
 			cgltf_accessor* posAccessor = NULL;
 
-			// ✅ Material extraction must be inside the primitive loop
-		// ✅ Material extraction must be inside the primitive loop
-		if (primitive->material)
-		{
-			cgltf_material* mat = primitive->material;
-		
-			// Default fallback color (pink)
-			outMesh->base_color[0] = 1.0f;
-			outMesh->base_color[1] = 0.2f;
-			outMesh->base_color[2] = 0.8f;
-			outMesh->base_color[3] = 1.0f;
-		
-			if (mat->has_pbr_metallic_roughness)
+			// ✅ Extract base color and hasTexture from material
+			vec4 baseColor = {1.0f, 0.0f, 1.0f, 1.0f}; // default pink
+			int hasTexture = 0;
+			const char* textureUri = NULL;
+
+			if (primitive->material && primitive->material->has_pbr_metallic_roughness)
 			{
-				cgltf_pbr_metallic_roughness* pbr = &mat->pbr_metallic_roughness;
-		
-				// ✅ Always copy base_color_factor
-				memcpy(outMesh->base_color, pbr->base_color_factor, sizeof(float) * 4);
-		
-				// ✅ Texture loading safely
+				cgltf_pbr_metallic_roughness* pbr = &primitive->material->pbr_metallic_roughness;
+
+				memcpy(baseColor, pbr->base_color_factor, sizeof(float) * 4);
+
 				if (pbr->base_color_texture.texture &&
 					pbr->base_color_texture.texture->image &&
 					pbr->base_color_texture.texture->image->uri)
 				{
-					const char* texUri = pbr->base_color_texture.texture->image->uri;
-		
-					// Free old texture path if already set
-					if (outMesh->texture_path != NULL)
-					{
-						free(outMesh->texture_path);
-						outMesh->texture_path = NULL;
-					}
-		
-					// Allocate and copy
-					outMesh->texture_path = malloc(strlen(texUri) + 1);
-					if (outMesh->texture_path)
-					{
-						strcpy(outMesh->texture_path, texUri);
-						outMesh->has_texture = 1;
-					}
-					else
-					{
-						outMesh->has_texture = 0;
-					}
-				}
-				else
-				{
-					outMesh->has_texture = 0;
+					textureUri = pbr->base_color_texture.texture->image->uri;
+					hasTexture = 1;
 				}
 			}
-		}
-		
 
-			// ✅ Look for position accessor
+			// ✅ Update Mesh-wide has_texture and texture_path (just for now)
+			if (hasTexture && textureUri)
+			{
+				if (outMesh->texture_path != NULL)
+				{
+					free(outMesh->texture_path);
+					outMesh->texture_path = NULL;
+				}
+
+				outMesh->texture_path = malloc(strlen(textureUri) + 1);
+				if (outMesh->texture_path)
+				{
+					strcpy(outMesh->texture_path, textureUri);
+					outMesh->has_texture = 1;
+				}
+			}
+			else
+			{
+				outMesh->has_texture = 0;
+			}
+
+			// ✅ Find POSITION accessor
 			for (cgltf_size a = 0; a < primitive->attributes_count; ++a)
 			{
 				if (strcmp(primitive->attributes[a].name, "POSITION") == 0)
@@ -694,7 +685,7 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 
 			if (!posAccessor) continue;
 
-			// ✅ Extract vertex data
+			// ✅ Extract vertices
 			for (cgltf_size v = 0; v < posAccessor->count; ++v)
 			{
 				Vertex vert = {0};
@@ -723,6 +714,9 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 					}
 				}
 
+				// ✅ FIXED: Set vertex color from material (removed duplicate assignment)
+				memcpy(vert.color, baseColor, sizeof(vec4));
+
 				outMesh->vertices[(*vertexOffset)++] = vert;
 			}
 
@@ -744,11 +738,48 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 		}
 	}
 
-	// ✅ Process child nodes recursively
+	// ✅ Recurse through children
 	for (cgltf_size i = 0; i < node->children_count; ++i)
 	{
 		processNode(node->children[i], outMesh, data, worldTransform, app, vertexOffset, indexOffset);
 	}
+}
+
+
+
+void checkMaterials(cgltf_data* data) {
+    printf("Total materials defined in file: %zu\n", data->materials_count);
+
+    size_t usedMaterialCount = 0;
+    bool usedMaterialFlags[256] = { false }; // assuming max 256 materials
+
+    for (size_t m = 0; m < data->meshes_count; ++m) {
+        const cgltf_mesh* mesh = &data->meshes[m];
+
+        for (size_t p = 0; p < mesh->primitives_count; ++p) {
+            const cgltf_primitive* prim = &mesh->primitives[p];
+            if (prim->material) {
+                size_t materialIndex = prim->material - data->materials;
+
+                if (!usedMaterialFlags[materialIndex]) {
+                    usedMaterialFlags[materialIndex] = true;
+                    usedMaterialCount++;
+
+                    printf("Used material %zu: %s\n",
+                        materialIndex,
+                        prim->material->name ? prim->material->name : "(unnamed)");
+
+                    // Print base color factor
+                    const float* color = prim->material->pbr_metallic_roughness.base_color_factor;
+                    printf("  Base Color: (%.2f, %.2f, %.2f, %.2f)\n", color[0], color[1], color[2], color[3]);
+                }
+            } else {
+                printf("Primitive has no material assigned.\n");
+            }
+        }
+    }
+
+    printf("Total materials actually used in primitives: %zu\n", usedMaterialCount);
 }
 
 
@@ -787,7 +818,7 @@ void loadGltfModel(const char* path, Mesh* outMesh)
 		cgltf_free(data);
 		exit(1);
 	}
-
+	checkMaterials(data);
 	// -------------------------
 	// Count vertices and indices first
 	size_t totalVertices = 0, totalIndices = 0;
@@ -925,7 +956,14 @@ void createBuffer(Application* app, Buffer* buffer, VkDeviceSize size, VkBufferU
     // 3. Find memory type and allocate
 	VkMemoryPropertyFlags desiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	uint32_t memoryTypeIndex = findMemoryType(&app->memoryProperties, memRequirements.memoryTypeBits, desiredFlags);
+	VkMemoryAllocateInfo allocInfo = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = NULL,
+		.allocationSize = bufferInfo.size,
+	};
 	allocInfo.memoryTypeIndex = memoryTypeIndex;
+	
+	
 	
 	VK_CHECK(vkAllocateMemory(app->device, &allocInfo, NULL, &buffer->memory));
 	VK_CHECK(vkBindBufferMemory(app->device, buffer->vkbuffer, buffer->memory, 0));
@@ -1494,16 +1532,18 @@ VkPipeline createGraphicsPipeline(Application* app, VkShaderModule vertShader, V
 	};
 
 	VkVertexInputAttributeDescription attributes[] = {
-	    {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
-	    {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
-	    {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texcoord)},
+		{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos) },
+		{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal) },
+		{ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texcoord) },
+		{ .location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color) }, // ✅
 	};
+	
 
 	VkPipelineVertexInputStateCreateInfo vertexInput = {
 	    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 	    .vertexBindingDescriptionCount = 1,
 	    .pVertexBindingDescriptions = &bindingDesc,
-	    .vertexAttributeDescriptionCount = 3,
+	    .vertexAttributeDescriptionCount = 4,
 	    .pVertexAttributeDescriptions = attributes,
 	};
 
@@ -1720,7 +1760,7 @@ void createSwapchainRelatedResources(Application* app)
 void createModelAndBuffers(Application* app)
 {
 	// Load model
-	loadGltfModel("flower.gltf", &app->mesh);
+	loadGltfModel("cookiie.gltf", &app->mesh);
 
 	// Create vertex buffer
 	size_t vertexBufferSize = app->mesh.vertex_count * sizeof(Vertex);

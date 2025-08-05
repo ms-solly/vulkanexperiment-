@@ -23,20 +23,13 @@ layout(binding = 0) uniform UniformBufferObject {
 } ubo;
 
 layout(binding = 1) uniform sampler2D texSampler;
-
-// ✅ New: BaseColor UBO at binding = 3
-layout(binding = 3) uniform BaseColorUBO_t {
-    vec4 baseColor;
-} baseColorUbo;
-
-// ✅ New: HasTexture UBO at binding = 4
-layout(binding = 4) uniform HasTextureUBO_t {
-    int hasTexture;
-} hasTextureUbo;
+layout(binding = 3) uniform BaseColorUBO_t { vec4 baseColor; } baseColorUbo;
+layout(binding = 4) uniform HasTextureUBO_t { int hasTexture; } hasTextureUbo;
 
 layout(location = 0) in vec3 fragWorldPos;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragTexCoord;
+layout(location = 3) in vec4 fragColor; // ✅ RECEIVE FROM VERTEX
 
 layout(location = 0) out vec4 outColor;
 
@@ -62,21 +55,20 @@ vec3 calculatePointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewD
 void main() {
     vec3 albedo;
     if (hasTextureUbo.hasTexture == 1) {
-        albedo = texture(texSampler, fragTexCoord).rgb * baseColorUbo.baseColor.rgb;
+        albedo = texture(texSampler, fragTexCoord).rgb * fragColor.rgb; // ✅ Use vertex color
     } else {
-        albedo = baseColorUbo.baseColor.rgb;
+        albedo = fragColor.rgb; // ✅ Use vertex color
     }
 
     vec3 normal = normalize(fragNormal);
     vec3 viewDir = normalize(ubo.cameraPos - fragWorldPos);
-    
+
     vec3 result = vec3(0.0);
     for (int i = 0; i < int(ubo.numLights); ++i) {
         if (i >= MAX_POINT_LIGHTS) break;
         result += calculatePointLight(ubo.lights[i], normal, fragWorldPos, viewDir, albedo);
     }
 
-    // Add a bit of ambient
     result += 0.15 * albedo;
 
     outColor = vec4(result, 1.0);
