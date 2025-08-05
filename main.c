@@ -96,6 +96,21 @@ typedef struct Texture
 	VkSampler sampler;
 } Texture;
 
+typedef struct Material
+{
+	vec4 base_color;        // Base color factor
+	int has_texture;        // Whether this material has a texture
+	int texture_index;      // Index into the textures array (-1 if no texture)
+	char* texture_path;     // Path to texture file
+} Material;
+
+typedef struct Primitive 
+{
+	u32 first_index;        // Starting index in the index buffer
+	u32 index_count;        // Number of indices for this primitive
+	int material_index;     // Index into the materials array
+} Primitive;
+
 #define MAX_POINT_LIGHTS 8
 
 typedef struct PointLight
@@ -126,6 +141,14 @@ typedef struct Mesh
     u32* indices;
     u32 vertex_count;
     u32 index_count;
+    
+    // Per-material texture support
+    Material* materials;
+    u32 material_count;
+    Primitive* primitives;
+    u32 primitive_count;
+    
+    // Legacy fields (kept for compatibility)
     char* texture_path;     // from glTF material texture
     vec4 base_color;        // from glTF material baseColorFactor
     int has_texture;        // 1 if texture used, else 0
@@ -194,6 +217,13 @@ typedef struct Application
 	Mesh mesh;
 	Buffer vertexBuffer;
 	Buffer indexBuffer;
+	
+	// Multiple textures support
+	Texture* textures;      // Array of textures
+	u32 texture_count;      // Number of textures
+	VkDescriptorSet* descriptorSets;  // One descriptor set per texture
+	
+	// Legacy single texture support (kept for compatibility)
 	Texture texture;
 	u32 mipLevels;
 	Buffer uniformBuffer;
@@ -448,6 +478,7 @@ void generateMipmaps(Application* app, VkCommandBuffer cmd, VkImage image, VkFor
 
 void createTextureImage(Application* app, const char* path, Texture* outTexture, u32* outMipLevels)
 {
+
     int texWidth, texHeight, texChannels;
     stbi_uc* pixels = stbi_load(path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     VkDeviceSize imageSize = texWidth * texHeight * 4;
@@ -615,7 +646,7 @@ uint32_t findMemoryType(const VkPhysicalDeviceMemoryProperties* memProperties, u
 }
 
 
-void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentTransform, Application* app, uint32_t* vertexOffset, uint32_t* indexOffset)
+void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentTransform, Application* app, uint32_t* vertexOffset, uint32_t* indexOffset, uint32_t* primitiveIndex)
 {
 	mat4 localTransform;
 	glm_mat4_identity(localTransform);
@@ -630,50 +661,22 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 		{
 			cgltf_primitive* primitive = &node->mesh->primitives[i];
 			uint32_t startVertex = *vertexOffset;
+			uint32_t startIndex = *indexOffset;
 			cgltf_accessor* posAccessor = NULL;
 
-			// ✅ Extract base color and hasTexture from material
-			vec4 baseColor = {1.0f, 0.0f, 1.0f, 1.0f}; // default pink
-			int hasTexture = 0;
-			const char* textureUri = NULL;
-
-			if (primitive->material && primitive->material->has_pbr_metallic_roughness)
-			{
-				cgltf_pbr_metallic_roughness* pbr = &primitive->material->pbr_metallic_roughness;
-
-				memcpy(baseColor, pbr->base_color_factor, sizeof(float) * 4);
-
-				if (pbr->base_color_texture.texture &&
-					pbr->base_color_texture.texture->image &&
-					pbr->base_color_texture.texture->image->uri)
-				{
-					textureUri = pbr->base_color_texture.texture->image->uri;
-					hasTexture = 1;
-				}
+			// Find material index
+			int materialIndex = -1;
+			if (primitive->material) {
+				materialIndex = (int)(primitive->material - data->materials);
 			}
 
-			// ✅ Update Mesh-wide has_texture and texture_path (just for now)
-			if (hasTexture && textureUri)
-			{
-				if (outMesh->texture_path != NULL)
-				{
-					free(outMesh->texture_path);
-					outMesh->texture_path = NULL;
-				}
-
-				outMesh->texture_path = malloc(strlen(textureUri) + 1);
-				if (outMesh->texture_path)
-				{
-					strcpy(outMesh->texture_path, textureUri);
-					outMesh->has_texture = 1;
-				}
-			}
-			else
-			{
-				outMesh->has_texture = 0;
+			// Get base color from material
+			vec4 baseColor = {1.0f, 1.0f, 1.0f, 1.0f}; // default white
+			if (materialIndex >= 0 && materialIndex < (int)outMesh->material_count) {
+				memcpy(baseColor, outMesh->materials[materialIndex].base_color, sizeof(vec4));
 			}
 
-			// ✅ Find POSITION accessor
+			// Find POSITION accessor
 			for (cgltf_size a = 0; a < primitive->attributes_count; ++a)
 			{
 				if (strcmp(primitive->attributes[a].name, "POSITION") == 0)
@@ -685,7 +688,7 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 
 			if (!posAccessor) continue;
 
-			// ✅ Extract vertices
+			// Extract vertices
 			for (cgltf_size v = 0; v < posAccessor->count; ++v)
 			{
 				Vertex vert = {0};
@@ -714,15 +717,17 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 					}
 				}
 
-				// ✅ FIXED: Set vertex color from material (removed duplicate assignment)
+				// Set vertex color from material
 				memcpy(vert.color, baseColor, sizeof(vec4));
 
 				outMesh->vertices[(*vertexOffset)++] = vert;
 			}
 
-			// ✅ Add indices
+			// Add indices and create primitive entry
+			uint32_t indexCount = 0;
 			if (primitive->indices)
 			{
+				indexCount = primitive->indices->count;
 				for (cgltf_size k = 0; k < primitive->indices->count; ++k)
 				{
 					outMesh->indices[(*indexOffset)++] = startVertex + cgltf_accessor_read_index(primitive->indices, k);
@@ -730,18 +735,27 @@ void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentT
 			}
 			else
 			{
+				indexCount = posAccessor->count;
 				for (cgltf_size k = 0; k < posAccessor->count; ++k)
 				{
 					outMesh->indices[(*indexOffset)++] = startVertex + k;
 				}
 			}
+			
+			// Create primitive entry
+			if (*primitiveIndex < outMesh->primitive_count) {
+				outMesh->primitives[*primitiveIndex].first_index = startIndex;
+				outMesh->primitives[*primitiveIndex].index_count = indexCount;
+				outMesh->primitives[*primitiveIndex].material_index = materialIndex;
+				(*primitiveIndex)++;
+			}
 		}
 	}
 
-	// ✅ Recurse through children
+	// Recurse through children
 	for (cgltf_size i = 0; i < node->children_count; ++i)
 	{
-		processNode(node->children[i], outMesh, data, worldTransform, app, vertexOffset, indexOffset);
+		processNode(node->children[i], outMesh, data, worldTransform, app, vertexOffset, indexOffset, primitiveIndex);
 	}
 }
 
@@ -818,41 +832,91 @@ void loadGltfModel(const char* path, Mesh* outMesh)
 		cgltf_free(data);
 		exit(1);
 	}
-	checkMaterials(data);
-	// -------------------------
-	// Count vertices and indices first
-	size_t totalVertices = 0, totalIndices = 0;
-	for (cgltf_size i = 0; i < data->meshes_count; ++i)
-	{
+	
+	// Initialize mesh
+	memset(outMesh, 0, sizeof(Mesh));
+	
+	// Parse materials first
+	outMesh->material_count = data->materials_count;
+	if (outMesh->material_count > 0) {
+		outMesh->materials = calloc(outMesh->material_count, sizeof(Material));
+		
+		for (cgltf_size i = 0; i < data->materials_count; ++i) {
+			cgltf_material* mat = &data->materials[i];
+			Material* ourMat = &outMesh->materials[i];
+			
+			// Initialize with default values
+			ourMat->base_color[0] = 1.0f;
+			ourMat->base_color[1] = 1.0f;
+			ourMat->base_color[2] = 1.0f;
+			ourMat->base_color[3] = 1.0f;
+			ourMat->has_texture = 0;
+			ourMat->texture_index = -1;
+			ourMat->texture_path = NULL;
+			
+			if (mat->has_pbr_metallic_roughness) {
+				cgltf_pbr_metallic_roughness* pbr = &mat->pbr_metallic_roughness;
+				memcpy(ourMat->base_color, pbr->base_color_factor, sizeof(float) * 4);
+				
+				if (pbr->base_color_texture.texture && 
+					pbr->base_color_texture.texture->image &&
+					pbr->base_color_texture.texture->image->uri) {
+					
+					const char* uri = pbr->base_color_texture.texture->image->uri;
+					size_t full_path_len = strlen(dir_path) + strlen(uri) + 1;
+					ourMat->texture_path = malloc(full_path_len);
+					snprintf(ourMat->texture_path, full_path_len, "%s%s", dir_path, uri);
+					ourMat->has_texture = 1;
+				}
+			}
+		}
+	}
+	
+	// Count vertices, indices, and primitives
+	size_t totalVertices = 0, totalIndices = 0, totalPrimitives = 0;
+	for (cgltf_size i = 0; i < data->meshes_count; ++i) {
 		cgltf_mesh* mesh = &data->meshes[i];
-		for (cgltf_size j = 0; j < mesh->primitives_count; ++j)
-		{
+		for (cgltf_size j = 0; j < mesh->primitives_count; ++j) {
 			cgltf_primitive* prim = &mesh->primitives[j];
 			if (prim->attributes_count == 0) continue;
 
 			totalVertices += prim->attributes[0].data->count;
 			totalIndices += prim->indices ? prim->indices->count : prim->attributes[0].data->count;
+			totalPrimitives++;
 		}
 	}
-
+	
+	// Allocate arrays
 	outMesh->vertex_count = totalVertices;
 	outMesh->index_count = totalIndices;
+	outMesh->primitive_count = totalPrimitives;
 	outMesh->vertices = calloc(totalVertices, sizeof(Vertex));
 	outMesh->indices = malloc(totalIndices * sizeof(u32));
+	outMesh->primitives = calloc(totalPrimitives, sizeof(Primitive));
 
 	uint32_t vertexOffset = 0;
 	uint32_t indexOffset = 0;
+	uint32_t primitiveIndex = 0;
 	mat4 identity;
 	glm_mat4_identity(identity);
 
-	for (cgltf_size i = 0; i < data->scenes[0].nodes_count; ++i)
-	{
-		processNode(data->scenes[0].nodes[i], outMesh, data, identity, NULL, &vertexOffset, &indexOffset);
+	for (cgltf_size i = 0; i < data->scenes[0].nodes_count; ++i) {
+		processNode(data->scenes[0].nodes[i], outMesh, data, identity, NULL, &vertexOffset, &indexOffset, &primitiveIndex);
 	}
 
-	// Texture (same as before, placeholder only)
-	outMesh->texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
-	strcpy(outMesh->texture_path, "Bark_DeadTree.png");
+	// Legacy support - use first material for backward compatibility
+	if (outMesh->material_count > 0) {
+		memcpy(outMesh->base_color, outMesh->materials[0].base_color, sizeof(vec4));
+		outMesh->has_texture = outMesh->materials[0].has_texture;
+		if (outMesh->materials[0].texture_path) {
+			outMesh->texture_path = malloc(strlen(outMesh->materials[0].texture_path) + 1);
+			strcpy(outMesh->texture_path, outMesh->materials[0].texture_path);
+		}
+	} else {
+		// Fallback
+		outMesh->texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
+		strcpy(outMesh->texture_path, "Bark_DeadTree.png");
+	}
 
 	free(dir_path);
 	cgltf_free(data);
@@ -860,6 +924,9 @@ void loadGltfModel(const char* path, Mesh* outMesh)
 
 void createGroundPlane(Mesh* outMesh)
 {
+	// Initialize mesh
+	memset(outMesh, 0, sizeof(Mesh));
+	
 	// Create a large plane (1000x1000 units) centered at origin
 	float size = 500.0f; // Half-size, so total size is 1000x1000
 	float texScale = 50.0f; // Texture repetition factor
@@ -872,28 +939,32 @@ void createGroundPlane(Mesh* outMesh)
 	outMesh->vertices[0] = (Vertex){
 		.pos = {-size, -0.1f, -size},  // Slightly below Y=0
 		.normal = {0.0f, 1.0f, 0.0f},
-		.texcoord = {0.0f, 0.0f}
+		.texcoord = {0.0f, 0.0f},
+		.color = {1.0f, 1.0f, 1.0f, 1.0f}
 	};
 	
 	// Bottom-right  
 	outMesh->vertices[1] = (Vertex){
 		.pos = {size, -0.1f, -size},
 		.normal = {0.0f, 1.0f, 0.0f},
-		.texcoord = {texScale, 0.0f}
+		.texcoord = {texScale, 0.0f},
+		.color = {1.0f, 1.0f, 1.0f, 1.0f}
 	};
 	
 	// Top-right
 	outMesh->vertices[2] = (Vertex){
 		.pos = {size, -0.1f, size},
 		.normal = {0.0f, 1.0f, 0.0f},
-		.texcoord = {texScale, texScale}
+		.texcoord = {texScale, texScale},
+		.color = {1.0f, 1.0f, 1.0f, 1.0f}
 	};
 	
 	// Top-left
 	outMesh->vertices[3] = (Vertex){
 		.pos = {-size, -0.1f, size},
 		.normal = {0.0f, 1.0f, 0.0f},
-		.texcoord = {0.0f, texScale}
+		.texcoord = {0.0f, texScale},
+		.color = {1.0f, 1.0f, 1.0f, 1.0f}
 	};
 	
 	// 6 indices for 2 triangles
@@ -910,9 +981,30 @@ void createGroundPlane(Mesh* outMesh)
 	outMesh->indices[4] = 2;
 	outMesh->indices[5] = 3;
 	
-	// Use same texture as the main model
+	// Create single material for ground plane
+	outMesh->material_count = 1;
+	outMesh->materials = calloc(1, sizeof(Material));
+	outMesh->materials[0].base_color[0] = 1.0f;
+	outMesh->materials[0].base_color[1] = 1.0f;
+	outMesh->materials[0].base_color[2] = 1.0f;
+	outMesh->materials[0].base_color[3] = 1.0f;
+	outMesh->materials[0].has_texture = 1;
+	outMesh->materials[0].texture_index = 0;
+	outMesh->materials[0].texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
+	strcpy(outMesh->materials[0].texture_path, "Bark_DeadTree.png");
+	
+	// Create single primitive
+	outMesh->primitive_count = 1;
+	outMesh->primitives = calloc(1, sizeof(Primitive));
+	outMesh->primitives[0].first_index = 0;
+	outMesh->primitives[0].index_count = 6;
+	outMesh->primitives[0].material_index = 0;
+	
+	// Legacy support
 	outMesh->texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
 	strcpy(outMesh->texture_path, "Bark_DeadTree.png");
+	outMesh->has_texture = 1;
+	memcpy(outMesh->base_color, outMesh->materials[0].base_color, sizeof(vec4));
 }
 
 // --- Memory/Buffer Helpers ---
@@ -1288,13 +1380,14 @@ VkDescriptorSetLayout createGridDescriptorSetLayout(VkDevice device)
 VkDescriptorPool createDescriptorPool(VkDevice device)
 {
 	VkDescriptorPoolSize poolSizes[] = {
-	    {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 3},
-	    {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 2}, // Changed to 2 for main texture + grid texture
+	    {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 200},  // Much more for many materials (26 textures × 3 uniform buffers each + extra)
+	    {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 200}, // Much more for many textures (26 textures × 2 samplers each + extra)
 	};
 
 	VkDescriptorPoolCreateInfo poolInfo = {
 	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-	    .maxSets = 1,
+	    .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // Allow freeing individual sets
+	    .maxSets = 100,  // Allow many descriptor sets
 	    .poolSizeCount = 2,
 	    .pPoolSizes = poolSizes,
 	};
@@ -1760,7 +1853,7 @@ void createSwapchainRelatedResources(Application* app)
 void createModelAndBuffers(Application* app)
 {
 	// Load model
-	loadGltfModel("cookiie.gltf", &app->mesh);
+	loadGltfModel("flower.gltf", &app->mesh);
 
 	// Create vertex buffer
 	size_t vertexBufferSize = app->mesh.vertex_count * sizeof(Vertex);
@@ -1827,8 +1920,46 @@ void createModelAndBuffers(Application* app)
 
 void createTextureResources(Application* app)
 {
-	createTextureImage(app, app->mesh.texture_path, &app->texture, &app->mipLevels);
-	createTextureSampler(app, &app->texture, app->mipLevels);
+	// Count unique textures from materials
+	app->texture_count = 0;
+	for (u32 i = 0; i < app->mesh.material_count; i++) {
+		if (app->mesh.materials[i].has_texture) {
+			app->texture_count++;
+		}
+	}
+	
+	// Always have at least one texture (fallback)
+	if (app->texture_count == 0) {
+		app->texture_count = 1;
+	}
+	
+	// Allocate texture array
+	app->textures = calloc(app->texture_count, sizeof(Texture));
+	
+	// Load textures and assign indices to materials
+	u32 textureIndex = 0;
+	for (u32 i = 0; i < app->mesh.material_count; i++) {
+		if (app->mesh.materials[i].has_texture && app->mesh.materials[i].texture_path) {
+			u32 mipLevels;
+			createTextureImage(app, app->mesh.materials[i].texture_path, &app->textures[textureIndex], &mipLevels);
+			createTextureSampler(app, &app->textures[textureIndex], mipLevels);
+			app->mesh.materials[i].texture_index = textureIndex;
+			textureIndex++;
+		}
+	}
+	
+	// Fallback texture if no materials have textures
+	if (textureIndex == 0) {
+		u32 mipLevels;
+		createTextureImage(app, app->mesh.texture_path ? app->mesh.texture_path : "Bark_DeadTree.png", &app->textures[0], &mipLevels);
+		createTextureSampler(app, &app->textures[0], mipLevels);
+	}
+	
+	// Legacy single texture support
+	if (app->texture_count > 0) {
+		app->texture = app->textures[0];
+		app->mipLevels = 1; // Default mip levels for legacy support
+	}
 }
 
 void createUniformBuffer(Application* app)
@@ -1845,53 +1976,59 @@ void createUniformBuffer(Application* app)
 
 void createDescriptors(Application* app)
 {
-	// Create descriptor pool and set
+	// Create descriptor pool
 	app->descriptorPool = createDescriptorPool(app->device);
-	app->descriptorSet = allocateDescriptorSet(app->device, app->descriptorPool, app->descriptorSetLayout);
-
-	// Update descriptor set
-	VkDescriptorBufferInfo bufferInfo = {.buffer = app->uniformBuffer.vkbuffer, .offset = 0, .range = sizeof(UniformBufferObject)};
-	VkDescriptorImageInfo imageInfo = {.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = app->texture.view, .sampler = app->texture.sampler};
-	VkDescriptorImageInfo gridImageInfo = {.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = app->gridTexture.view, .sampler = app->gridTexture.sampler};
-	VkDescriptorBufferInfo baseColorBufferInfo = {
-		.buffer = app->baseColorBuffer.vkbuffer,
-		.offset = 0,
-		.range = sizeof(vec4)
-	};
 	
-	VkDescriptorBufferInfo hasTextureBufferInfo = {
-		.buffer = app->hasTextureBuffer.vkbuffer,
-		.offset = 0,
-		.range = sizeof(int)
-	};
+	// Allocate descriptor sets for each texture
+	app->descriptorSets = calloc(app->texture_count, sizeof(VkDescriptorSet));
 	
-
+	for (u32 i = 0; i < app->texture_count; i++) {
+		app->descriptorSets[i] = allocateDescriptorSet(app->device, app->descriptorPool, app->descriptorSetLayout);
+		
+		// Update descriptor set for this texture
+		VkDescriptorBufferInfo bufferInfo = {
+			.buffer = app->uniformBuffer.vkbuffer,
+			.offset = 0,
+			.range = sizeof(UniformBufferObject)
+		};
+		
+		VkDescriptorImageInfo imageInfo = {
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.imageView = app->textures[i].view,
+			.sampler = app->textures[i].sampler
+		};
+		
+		VkDescriptorImageInfo gridImageInfo = {
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			.imageView = app->gridTexture.view,
+			.sampler = app->gridTexture.sampler
+		};
+		
+		VkDescriptorBufferInfo baseColorBufferInfo = {
+			.buffer = app->baseColorBuffer.vkbuffer,
+			.offset = 0,
+			.range = sizeof(vec4)
+		};
+		
+		VkDescriptorBufferInfo hasTextureBufferInfo = {
+			.buffer = app->hasTextureBuffer.vkbuffer,
+			.offset = 0,
+			.range = sizeof(int)
+		};
+		
 		VkWriteDescriptorSet descriptorWrites[] = {
-	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSet, .dstBinding = 0, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &bufferInfo},
-	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSet, .dstBinding = 1, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &imageInfo},
-	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSet, .dstBinding = 2, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &gridImageInfo},
-		{
-			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-			.dstSet = app->descriptorSet,
-			.dstBinding = 3,
-			.dstArrayElement = 0,
-			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-			.descriptorCount = 1,
-			.pBufferInfo = &baseColorBufferInfo
-		},
-		// New: hasTextureBinding (binding = 4)
-		{
-			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-			.dstSet = app->descriptorSet,
-			.dstBinding = 4,
-			.dstArrayElement = 0,
-			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-			.descriptorCount = 1,
-			.pBufferInfo = &hasTextureBufferInfo
-		}
-	};
-	vkUpdateDescriptorSets(app->device, 5, descriptorWrites, 0, NULL);
-
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 0, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &bufferInfo},
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 1, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &imageInfo},
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 2, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &gridImageInfo},
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 3, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &baseColorBufferInfo},
+			{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSets[i], .dstBinding = 4, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &hasTextureBufferInfo}
+		};
+		
+		vkUpdateDescriptorSets(app->device, 5, descriptorWrites, 0, NULL);
+	}
+	
+	// Legacy single descriptor set support (use first texture)
+	app->descriptorSet = app->descriptorSets[0];
 }
 
 void createSyncObjects(Application* app)
@@ -2016,9 +2153,9 @@ void cleanupSyncObjects(Application* app)
 	{
 		vkDestroyFence(app->device, app->inFlightFences[i], NULL);
 	}
-	free(app->renderFinishedSemaphores);
-	free(app->imageAvailableSemaphores);
-	free(app->inFlightFences);
+	//free(app->renderFinishedSemaphores);
+	//free(app->imageAvailableSemaphores);
+	//free(app->inFlightFences);
 }
 
 void cleanupResources(Application* app)
@@ -2027,11 +2164,27 @@ void cleanupResources(Application* app)
 	destroyBuffer(app->device, &app->indexBuffer);
 	destroyBuffer(app->device, &app->vertexBuffer);
 	destroyBuffer(app->device, &app->gridVertexBuffer);
+	destroyBuffer(app->device, &app->baseColorBuffer);
+	destroyBuffer(app->device, &app->hasTextureBuffer);
 
-	vkDestroySampler(app->device, app->texture.sampler, NULL);
-	vkDestroyImageView(app->device, app->texture.view, NULL);
-	vkDestroyImage(app->device, app->texture.image, NULL);
-	vkFreeMemory(app->device, app->texture.memory, NULL);
+	// Clean up multiple textures
+	if (app->textures) {
+		for (u32 i = 0; i < app->texture_count; i++) {
+			vkDestroySampler(app->device, app->textures[i].sampler, NULL);
+			vkDestroyImageView(app->device, app->textures[i].view, NULL);
+			vkDestroyImage(app->device, app->textures[i].image, NULL);
+			vkFreeMemory(app->device, app->textures[i].memory, NULL);
+		}
+		free(app->textures);
+	}
+	
+	// Legacy single texture cleanup (in case it's different from textures array)
+	if (app->texture.sampler && app->texture.sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(app->device, app->texture.sampler, NULL);
+		vkDestroyImageView(app->device, app->texture.view, NULL);
+		vkDestroyImage(app->device, app->texture.image, NULL);
+		vkFreeMemory(app->device, app->texture.memory, NULL);
+	}
 
 	// Clean up grid texture
 	vkDestroySampler(app->device, app->gridTexture.sampler, NULL);
@@ -2040,10 +2193,27 @@ void cleanupResources(Application* app)
 	vkFreeMemory(app->device, app->gridTexture.memory, NULL);
 
 	vkDestroyDescriptorPool(app->device, app->descriptorPool, NULL);
+	
+	// Clean up descriptor sets array
+	if (app->descriptorSets) {
+		free(app->descriptorSets);
+	}
 
+	// Clean up mesh data
 	free(app->mesh.vertices);
 	free(app->mesh.indices);
 	free(app->mesh.texture_path);
+	
+	// Clean up materials
+	if (app->mesh.materials) {
+		for (u32 i = 0; i < app->mesh.material_count; i++) {
+			free(app->mesh.materials[i].texture_path);
+		}
+		free(app->mesh.materials);
+	}
+	
+	// Clean up primitives
+	free(app->mesh.primitives);
 }
 
 void cleanupPipeline(Application* app)
@@ -2227,14 +2397,52 @@ void recordCommandBuffer(Application* app, VkCommandBuffer commandBuffer, u32 im
 	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipelineLayout, 0, 1, &app->descriptorSet, 0, NULL);
 	vkCmdDraw(commandBuffer, 3, 1, 0, 0); // Fullscreen triangle
 
-	// Switch back to main pipeline and draw model
+	// Switch back to main pipeline and draw model primitives
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipeline);
 	VkBuffer vertexBuffers2[] = {app->vertexBuffer.vkbuffer};
 	VkDeviceSize offsets2[] = {0};
 	vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers2, offsets2);
 	vkCmdBindIndexBuffer(commandBuffer, app->indexBuffer.vkbuffer, 0, VK_INDEX_TYPE_UINT32);
-	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipelineLayout, 0, 1, &app->descriptorSet, 0, NULL);
-	vkCmdDrawIndexed(commandBuffer, app->mesh.index_count, 1, 0, 0, 0);
+	
+	// Draw each primitive with its material
+	for (u32 i = 0; i < app->mesh.primitive_count; i++) {
+		Primitive* prim = &app->mesh.primitives[i];
+		
+		// Update material-specific uniform buffers
+		if (prim->material_index >= 0 && prim->material_index < (int)app->mesh.material_count) {
+			Material* mat = &app->mesh.materials[prim->material_index];
+			
+			// Update base color buffer
+			memcpy(app->baseColorBuffer.data, mat->base_color, sizeof(vec4));
+			
+			// Update has texture buffer
+			int hasTexture = mat->has_texture;
+			memcpy(app->hasTextureBuffer.data, &hasTexture, sizeof(int));
+			
+			// Bind the correct descriptor set for this material's texture
+			VkDescriptorSet descriptorSet = app->descriptorSet; // Default
+			if (mat->has_texture && mat->texture_index >= 0 && mat->texture_index < (int)app->texture_count) {
+				descriptorSet = app->descriptorSets[mat->texture_index];
+			}
+			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipelineLayout, 0, 1, &descriptorSet, 0, NULL);
+		} else {
+			// Use default material
+			vec4 defaultColor = {1.0f, 1.0f, 1.0f, 1.0f};
+			int hasTexture = 0;
+			memcpy(app->baseColorBuffer.data, defaultColor, sizeof(vec4));
+			memcpy(app->hasTextureBuffer.data, &hasTexture, sizeof(int));
+			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipelineLayout, 0, 1, &app->descriptorSet, 0, NULL);
+		}
+		
+		// Draw this primitive
+		vkCmdDrawIndexed(commandBuffer, prim->index_count, 1, prim->first_index, 0, 0);
+	}
+	
+	// Fallback: if no primitives, draw the whole mesh (legacy support)
+	if (app->mesh.primitive_count == 0) {
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipelineLayout, 0, 1, &app->descriptorSet, 0, NULL);
+		vkCmdDrawIndexed(commandBuffer, app->mesh.index_count, 1, 0, 0, 0);
+	}
 
 	vkCmdEndRenderPass(commandBuffer);
 	VK_CHECK(vkEndCommandBuffer(commandBuffer));
