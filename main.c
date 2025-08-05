@@ -1853,7 +1853,7 @@ void createSwapchainRelatedResources(Application* app)
 void createModelAndBuffers(Application* app)
 {
 	// Load model
-	loadGltfModel("flower.gltf", &app->mesh);
+	loadGltfModel("cookie.gltf", &app->mesh);
 
 	// Create vertex buffer
 	size_t vertexBufferSize = app->mesh.vertex_count * sizeof(Vertex);
