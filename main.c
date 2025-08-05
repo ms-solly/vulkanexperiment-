@@ -72,12 +72,13 @@
 
 // --- Core Structures ---
 
-typedef struct Vertex
-{
-	vec3 pos;
-	vec3 normal;
-	vec2 texcoord;
+typedef struct {
+    vec3 pos;
+    vec3 normal;
+    vec2 texcoord;
+    vec4 color; // 👈 Per-vertex color from material
 } Vertex;
+
 
 typedef struct Buffer
 {
@@ -121,12 +122,15 @@ typedef struct UniformBufferObject
 
 typedef struct Mesh
 {
-	Vertex* vertices;
-	u32* indices;
-	u32 vertex_count;
-	u32 index_count;
-	char* texture_path;
+    Vertex* vertices;
+    u32* indices;
+    u32 vertex_count;
+    u32 index_count;
+    char* texture_path;     // from glTF material texture
+    vec4 base_color;        // from glTF material baseColorFactor
+    int has_texture;        // 1 if texture used, else 0
 } Mesh;
+
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
@@ -173,6 +177,11 @@ typedef struct Application
 	VkImageView depthImageView;
 	VkFormat depthFormat;
 
+	// Command pool and buffers
+	Buffer baseColorBuffer;
+    Buffer hasTextureBuffer;
+
+
 	// Pipeline
 	VkRenderPass renderPass;
 	VkDescriptorSetLayout descriptorSetLayout;
@@ -202,6 +211,10 @@ typedef struct Application
 	// Descriptors
 	VkDescriptorPool descriptorPool;
 	VkDescriptorSet descriptorSet;
+	VkPhysicalDeviceMemoryProperties memProperties;
+	// VkPhysicalDeviceMemoryProperties physicalDeviceMemoryProperties;
+
+
 
 	// Lighting
 	PointLight lights[MAX_POINT_LIGHTS];
@@ -236,6 +249,10 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels);
 // --- Model Loading ---
 void loadGltfModel(const char* path, Mesh* outMesh);
 void createGroundPlane(Mesh* outMesh);
+uint32_t findMemoryType(const VkPhysicalDeviceMemoryProperties* memProperties, uint32_t typeFilter, VkMemoryPropertyFlags properties);
+void checkMaterials(cgltf_data* data);
+
+
 
 // --- Vulkan Helpers ---
 VkInstance createVulkanInstance(void);
@@ -327,210 +344,235 @@ void endSingleTimeCommands(Application* app, VkCommandBuffer commandBuffer)
 	vkFreeCommandBuffers(app->device, app->commandPool, 1, &commandBuffer);
 }
 
-void generateMipmaps(Application* app, VkCommandBuffer commandBuffer, VkImage image, VkFormat imageFormat, i32 texWidth, i32 texHeight, u32 mipLevels)
+void generateMipmaps(Application* app, VkCommandBuffer cmd, VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels)
 {
-	// Check if image format supports linear blitting
-	VkFormatProperties formatProperties;
-	vkGetPhysicalDeviceFormatProperties(app->physicalDevice, imageFormat, &formatProperties);
-	if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
-	{
-		assert(0 && "texture image format does not support linear blitting!");
-	}
+    int32_t mipWidth = texWidth;
+    int32_t mipHeight = texHeight;
 
-	VkImageMemoryBarrier barrier = {
-	    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-	    .image = image,
-	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	    .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-	    .subresourceRange.baseArrayLayer = 0,
-	    .subresourceRange.layerCount = 1,
-	    .subresourceRange.levelCount = 1,
-	};
+    for (uint32_t i = 1; i < mipLevels; i++)
+    {
+        VkImageMemoryBarrier barrierBeforeBlit = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .image = image,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .subresourceRange.baseArrayLayer = 0,
+            .subresourceRange.layerCount = 1,
+            .subresourceRange.levelCount = 1,
+            .subresourceRange.baseMipLevel = i - 1,
+            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        };
 
-	i32 mipWidth = texWidth;
-	i32 mipHeight = texHeight;
+        vkCmdPipelineBarrier(
+            cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            0, NULL,
+            0, NULL,
+            1, &barrierBeforeBlit);
 
-	for (u32 i = 1; i < mipLevels; i++)
-	{
-		barrier.subresourceRange.baseMipLevel = i - 1;
-		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-		barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        VkImageBlit blit = {
+            .srcOffsets[1] = { mipWidth, mipHeight, 1 },
+            .srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .srcSubresource.mipLevel = i - 1,
+            .srcSubresource.baseArrayLayer = 0,
+            .srcSubresource.layerCount = 1,
 
-		vkCmdPipelineBarrier(commandBuffer,
-		    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-		    0, NULL,
-		    0, NULL,
-		    1, &barrier);
+            .dstOffsets[1] = {
+                mipWidth > 1 ? mipWidth / 2 : 1,
+                mipHeight > 1 ? mipHeight / 2 : 1,
+                1
+            },
+            .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .dstSubresource.mipLevel = i,
+            .dstSubresource.baseArrayLayer = 0,
+            .dstSubresource.layerCount = 1,
+        };
 
-		VkImageBlit blit = {
-		    .srcOffsets[0] = {0, 0, 0},
-		    .srcOffsets[1] = {mipWidth, mipHeight, 1},
-		    .srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		    .srcSubresource.mipLevel = i - 1,
-		    .srcSubresource.baseArrayLayer = 0,
-		    .srcSubresource.layerCount = 1,
-		    .dstOffsets[0] = {0, 0, 0},
-		    .dstOffsets[1] = {mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1},
-		    .dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		    .dstSubresource.mipLevel = i,
-		    .dstSubresource.baseArrayLayer = 0,
-		    .dstSubresource.layerCount = 1,
-		};
+        vkCmdBlitImage(
+            cmd,
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit,
+            VK_FILTER_LINEAR);
 
-		vkCmdBlitImage(commandBuffer,
-		    image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		    image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		    1, &blit,
-		    VK_FILTER_LINEAR);
+        // Transition previous mip level to SHADER_READ_ONLY_OPTIMAL
+        VkImageMemoryBarrier barrierAfterBlit = barrierBeforeBlit;
+        barrierAfterBlit.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrierAfterBlit.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrierAfterBlit.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrierAfterBlit.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
-		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(
+            cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0, NULL,
+            0, NULL,
+            1, &barrierAfterBlit);
 
-		vkCmdPipelineBarrier(commandBuffer,
-		    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-		    0, NULL,
-		    0, NULL,
-		    1, &barrier);
+        if (mipWidth > 1) mipWidth /= 2;
+        if (mipHeight > 1) mipHeight /= 2;
+    }
 
-		if (mipWidth > 1)
-			mipWidth /= 2;
-		if (mipHeight > 1)
-			mipHeight /= 2;
-	}
+    // Transition last mip level to SHADER_READ_ONLY_OPTIMAL
+    VkImageMemoryBarrier lastBarrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .image = image,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .subresourceRange.baseMipLevel = mipLevels - 1,
+        .subresourceRange.levelCount = 1,
+        .subresourceRange.baseArrayLayer = 0,
+        .subresourceRange.layerCount = 1,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+    };
 
-	barrier.subresourceRange.baseMipLevel = mipLevels - 1;
-	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-	vkCmdPipelineBarrier(commandBuffer,
-	    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-	    0, NULL,
-	    0, NULL,
-	    1, &barrier);
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0, NULL,
+        0, NULL,
+        1, &lastBarrier);
 }
+
 
 void createTextureImage(Application* app, const char* path, Texture* outTexture, u32* outMipLevels)
 {
-	int texWidth, texHeight, texChannels;
-	stbi_uc* pixels = stbi_load(path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-	VkDeviceSize imageSize = texWidth * texHeight * 4;
+    int texWidth, texHeight, texChannels;
+    stbi_uc* pixels = stbi_load(path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    VkDeviceSize imageSize = texWidth * texHeight * 4;
 
-	*outMipLevels = (u32)(floor(log2(texWidth > texHeight ? texWidth : texHeight))) + 1;
+    *outMipLevels = (u32)(floor(log2(texWidth > texHeight ? texWidth : texHeight))) + 1;
 
-	if (!pixels)
-	{
-		fprintf(stderr, "Failed to load texture image: %s\n", path);
-		fprintf(stderr, "STB Error: %s\n", stbi_failure_reason());
-		exit(1);
-	}
+    if (!pixels)
+    {
+        fprintf(stderr, "Failed to load texture image: %s\n", path);
+        fprintf(stderr, "STB Error: %s\n", stbi_failure_reason());
+        exit(1);
+    }
 
-	printf("Loaded texture: %s (%dx%d, %d channels, %u mip levels)\n",
-	    path, texWidth, texHeight, texChannels, *outMipLevels);
+    printf("Loaded texture: %s (%dx%d, %d channels, %u mip levels)\n",
+        path, texWidth, texHeight, texChannels, *outMipLevels);
 
-	Buffer stagingBuffer;
-	createBuffer(app, &stagingBuffer, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-	memcpy(stagingBuffer.data, pixels, (size_t)imageSize);
-	stbi_image_free(pixels);
+    Buffer stagingBuffer;
+    createBuffer(app, &stagingBuffer, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    memcpy(stagingBuffer.data, pixels, (size_t)imageSize);
+    stbi_image_free(pixels);
 
-	VkImageCreateInfo imageInfo = {
-	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-	    .imageType = VK_IMAGE_TYPE_2D,
-	    .extent.width = texWidth,
-	    .extent.height = texHeight,
-	    .extent.depth = 1,
-	    .mipLevels = *outMipLevels,
-	    .arrayLayers = 1,
-	    .format = VK_FORMAT_R8G8B8A8_SRGB,
-	    .tiling = VK_IMAGE_TILING_OPTIMAL,
-	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-	    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-	    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	    .samples = VK_SAMPLE_COUNT_1_BIT,
-	};
+    VkImageCreateInfo imageInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent.width = texWidth,
+        .extent.height = texHeight,
+        .extent.depth = 1,
+        .mipLevels = *outMipLevels,
+        .arrayLayers = 1,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+    };
 
-	VK_CHECK(vkCreateImage(app->device, &imageInfo, NULL, &outTexture->image));
+    VK_CHECK(vkCreateImage(app->device, &imageInfo, NULL, &outTexture->image));
 
-	VkMemoryRequirements memRequirements;
-	vkGetImageMemoryRequirements(app->device, outTexture->image, &memRequirements);
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(app->device, outTexture->image, &memRequirements);
 
-	VkMemoryAllocateInfo allocInfo = {
-	    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-	    .allocationSize = memRequirements.size,
-	    .memoryTypeIndex = selectmemorytype(&app->memoryProperties, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
-	};
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = selectmemorytype(&app->memoryProperties, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    };
 
-	VK_CHECK(vkAllocateMemory(app->device, &allocInfo, NULL, &outTexture->memory));
-	VK_CHECK(vkBindImageMemory(app->device, outTexture->image, outTexture->memory, 0));
+    VK_CHECK(vkAllocateMemory(app->device, &allocInfo, NULL, &outTexture->memory));
+    VK_CHECK(vkBindImageMemory(app->device, outTexture->image, outTexture->memory, 0));
 
-	VkCommandBuffer commandBuffer = beginSingleTimeCommands(app);
+    VkCommandBuffer commandBuffer = beginSingleTimeCommands(app);
 
-	// Transition layout to TRANSFER_DST_OPTIMAL
-	VkImageMemoryBarrier barrier = {
-	    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-	    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-	    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-	    .image = outTexture->image,
-	    .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-	    .subresourceRange.baseMipLevel = 0,
-	    .subresourceRange.levelCount = *outMipLevels,
-	    .subresourceRange.baseArrayLayer = 0,
-	    .subresourceRange.layerCount = 1,
-	    .srcAccessMask = 0,
-	    .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-	};
+    // Transition layout to TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = outTexture->image,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .subresourceRange.baseMipLevel = 0,
+        .subresourceRange.levelCount = *outMipLevels,
+        .subresourceRange.baseArrayLayer = 0,
+        .subresourceRange.layerCount = 1,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+    };
 
-	vkCmdPipelineBarrier(
-	    commandBuffer,
-	    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-	    0,
-	    0, NULL,
-	    0, NULL,
-	    1, &barrier);
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0, NULL,
+        0, NULL,
+        1, &barrier);
 
-	// Copy buffer to image
-	VkBufferImageCopy region = {
-	    .bufferOffset = 0,
-	    .bufferRowLength = 0,
-	    .bufferImageHeight = 0,
-	    .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-	    .imageSubresource.mipLevel = 0,
-	    .imageSubresource.baseArrayLayer = 0,
-	    .imageSubresource.layerCount = 1,
-	    .imageOffset = {0, 0, 0},
-	    .imageExtent = {(u32)texWidth, (u32)texHeight, 1},
-	};
-	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.vkbuffer, outTexture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    // Copy buffer to image
+    VkBufferImageCopy region = {
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .imageSubresource.mipLevel = 0,
+        .imageSubresource.baseArrayLayer = 0,
+        .imageSubresource.layerCount = 1,
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {(u32)texWidth, (u32)texHeight, 1},
+    };
+    vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.vkbuffer, outTexture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	// Generate mipmaps and transition layout to shader read
-	generateMipmaps(app, commandBuffer, outTexture->image, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, *outMipLevels);
+    // Generate mipmaps and transition layout to shader read
+    generateMipmaps(app, commandBuffer, outTexture->image, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, *outMipLevels);
 
-	endSingleTimeCommands(app, commandBuffer);
+    endSingleTimeCommands(app, commandBuffer);
 
-	destroyBuffer(app->device, &stagingBuffer);
+    destroyBuffer(app->device, &stagingBuffer);
 
-	// Create image view
-	VkImageViewCreateInfo viewInfo = {
-	    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-	    .image = outTexture->image,
-	    .viewType = VK_IMAGE_VIEW_TYPE_2D,
-	    .format = VK_FORMAT_R8G8B8A8_SRGB,
-	    .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-	    .subresourceRange.baseMipLevel = 0,
-	    .subresourceRange.levelCount = *outMipLevels,
-	    .subresourceRange.baseArrayLayer = 0,
-	    .subresourceRange.layerCount = 1,
-	};
-	VK_CHECK(vkCreateImageView(app->device, &viewInfo, NULL, &outTexture->view));
+    // Create image view
+    VkImageViewCreateInfo viewInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = outTexture->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .subresourceRange.baseMipLevel = 0,
+        .subresourceRange.levelCount = *outMipLevels,
+        .subresourceRange.baseArrayLayer = 0,
+        .subresourceRange.layerCount = 1,
+    };
+    VK_CHECK(vkCreateImageView(app->device, &viewInfo, NULL, &outTexture->view));
 }
+void updateBaseColorAndHasTexture(Application* app)
+{
+    // ✅ Use already mapped pointer for baseColor
+    memcpy(app->baseColorBuffer.data, app->mesh.base_color, sizeof(vec4));
+
+    // ✅ Use already mapped pointer for hasTexture
+    int hasTexture = app->mesh.has_texture;
+    memcpy(app->hasTextureBuffer.data, &hasTexture, sizeof(int));
+}
+
+
+
 
 void createTextureSampler(Application* app, Texture* texture, u32 mipLevels)
 {
@@ -559,198 +601,258 @@ void createTextureSampler(Application* app, Texture* texture, u32 mipLevels)
 	VK_CHECK(vkCreateSampler(app->device, &samplerInfo, NULL, &texture->sampler));
 }
 
+uint32_t findMemoryType(const VkPhysicalDeviceMemoryProperties* memProperties, uint32_t typeFilter, VkMemoryPropertyFlags properties)
+{
+    for (uint32_t i = 0; i < memProperties->memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) &&
+            (memProperties->memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+
+    fprintf(stderr, "Failed to find suitable memory type!\n");
+    exit(1);
+}
+
+
+void processNode(cgltf_node* node, Mesh* outMesh, cgltf_data* data, mat4 parentTransform, Application* app, uint32_t* vertexOffset, uint32_t* indexOffset)
+{
+	mat4 localTransform;
+	glm_mat4_identity(localTransform);
+	cgltf_node_transform_local(node, (cgltf_float*)localTransform);
+
+	mat4 worldTransform;
+	glm_mat4_mul(parentTransform, localTransform, worldTransform);
+
+	if (node->mesh)
+	{
+		for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i)
+		{
+			cgltf_primitive* primitive = &node->mesh->primitives[i];
+			uint32_t startVertex = *vertexOffset;
+			cgltf_accessor* posAccessor = NULL;
+
+			// ✅ Extract base color and hasTexture from material
+			vec4 baseColor = {1.0f, 0.0f, 1.0f, 1.0f}; // default pink
+			int hasTexture = 0;
+			const char* textureUri = NULL;
+
+			if (primitive->material && primitive->material->has_pbr_metallic_roughness)
+			{
+				cgltf_pbr_metallic_roughness* pbr = &primitive->material->pbr_metallic_roughness;
+
+				memcpy(baseColor, pbr->base_color_factor, sizeof(float) * 4);
+
+				if (pbr->base_color_texture.texture &&
+					pbr->base_color_texture.texture->image &&
+					pbr->base_color_texture.texture->image->uri)
+				{
+					textureUri = pbr->base_color_texture.texture->image->uri;
+					hasTexture = 1;
+				}
+			}
+
+			// ✅ Update Mesh-wide has_texture and texture_path (just for now)
+			if (hasTexture && textureUri)
+			{
+				if (outMesh->texture_path != NULL)
+				{
+					free(outMesh->texture_path);
+					outMesh->texture_path = NULL;
+				}
+
+				outMesh->texture_path = malloc(strlen(textureUri) + 1);
+				if (outMesh->texture_path)
+				{
+					strcpy(outMesh->texture_path, textureUri);
+					outMesh->has_texture = 1;
+				}
+			}
+			else
+			{
+				outMesh->has_texture = 0;
+			}
+
+			// ✅ Find POSITION accessor
+			for (cgltf_size a = 0; a < primitive->attributes_count; ++a)
+			{
+				if (strcmp(primitive->attributes[a].name, "POSITION") == 0)
+				{
+					posAccessor = primitive->attributes[a].data;
+					break;
+				}
+			}
+
+			if (!posAccessor) continue;
+
+			// ✅ Extract vertices
+			for (cgltf_size v = 0; v < posAccessor->count; ++v)
+			{
+				Vertex vert = {0};
+
+				for (cgltf_size a = 0; a < primitive->attributes_count; ++a)
+				{
+					cgltf_attribute* attr = &primitive->attributes[a];
+					float* buffer = (float*)attr->data->buffer_view->buffer->data +
+						attr->data->buffer_view->offset / sizeof(float) +
+						attr->data->offset / sizeof(float);
+
+					if (strcmp(attr->name, "POSITION") == 0)
+					{
+						vec4 pos = { buffer[v * 3], buffer[v * 3 + 1], buffer[v * 3 + 2], 1.0f };
+						vec4 transformed;
+						glm_mat4_mulv(worldTransform, pos, transformed);
+						glm_vec3_copy(transformed, vert.pos);
+					}
+					else if (strcmp(attr->name, "NORMAL") == 0)
+					{
+						memcpy(&vert.normal, buffer + v * 3, sizeof(vec3));
+					}
+					else if (strcmp(attr->name, "TEXCOORD_0") == 0)
+					{
+						memcpy(&vert.texcoord, buffer + v * 2, sizeof(vec2));
+					}
+				}
+
+				// ✅ FIXED: Set vertex color from material (removed duplicate assignment)
+				memcpy(vert.color, baseColor, sizeof(vec4));
+
+				outMesh->vertices[(*vertexOffset)++] = vert;
+			}
+
+			// ✅ Add indices
+			if (primitive->indices)
+			{
+				for (cgltf_size k = 0; k < primitive->indices->count; ++k)
+				{
+					outMesh->indices[(*indexOffset)++] = startVertex + cgltf_accessor_read_index(primitive->indices, k);
+				}
+			}
+			else
+			{
+				for (cgltf_size k = 0; k < posAccessor->count; ++k)
+				{
+					outMesh->indices[(*indexOffset)++] = startVertex + k;
+				}
+			}
+		}
+	}
+
+	// ✅ Recurse through children
+	for (cgltf_size i = 0; i < node->children_count; ++i)
+	{
+		processNode(node->children[i], outMesh, data, worldTransform, app, vertexOffset, indexOffset);
+	}
+}
+
+
+
+void checkMaterials(cgltf_data* data) {
+    printf("Total materials defined in file: %zu\n", data->materials_count);
+
+    size_t usedMaterialCount = 0;
+    bool usedMaterialFlags[256] = { false }; // assuming max 256 materials
+
+    for (size_t m = 0; m < data->meshes_count; ++m) {
+        const cgltf_mesh* mesh = &data->meshes[m];
+
+        for (size_t p = 0; p < mesh->primitives_count; ++p) {
+            const cgltf_primitive* prim = &mesh->primitives[p];
+            if (prim->material) {
+                size_t materialIndex = prim->material - data->materials;
+
+                if (!usedMaterialFlags[materialIndex]) {
+                    usedMaterialFlags[materialIndex] = true;
+                    usedMaterialCount++;
+
+                    printf("Used material %zu: %s\n",
+                        materialIndex,
+                        prim->material->name ? prim->material->name : "(unnamed)");
+
+                    // Print base color factor
+                    const float* color = prim->material->pbr_metallic_roughness.base_color_factor;
+                    printf("  Base Color: (%.2f, %.2f, %.2f, %.2f)\n", color[0], color[1], color[2], color[3]);
+                }
+            } else {
+                printf("Primitive has no material assigned.\n");
+            }
+        }
+    }
+
+    printf("Total materials actually used in primitives: %zu\n", usedMaterialCount);
+}
+
+
 // --- Model Loading ---
 
 void loadGltfModel(const char* path, Mesh* outMesh)
 {
 	cgltf_options options = {0};
 	cgltf_data* data = NULL;
-	cgltf_result result = cgltf_parse_file(&options, path, &data);
-	if (result != cgltf_result_success)
+
+	if (cgltf_parse_file(&options, path, &data) != cgltf_result_success)
 	{
 		fprintf(stderr, "Failed to parse GLTF file: %s\n", path);
 		exit(1);
 	}
 
-	// Extract directory path for loading buffers
 	char* dir_path = NULL;
 	char* last_slash = strrchr(path, '/');
-	if (last_slash != NULL)
+	if (last_slash)
 	{
 		size_t dir_len = last_slash - path + 1;
 		dir_path = malloc(dir_len + 1);
-		if (!dir_path)
-		{
-			fprintf(stderr, "Memory allocation failed for directory path\n");
-			cgltf_free(data);
-			exit(1);
-		}
 		strncpy(dir_path, path, dir_len);
 		dir_path[dir_len] = '\0';
 	}
 	else
 	{
-		// Current directory if no slash found
 		dir_path = malloc(3);
 		strcpy(dir_path, "./");
-		if (!dir_path)
-		{
-			fprintf(stderr, "Memory allocation failed for directory path\n");
-			cgltf_free(data);
-			exit(1);
-		}
 	}
 
-	// Load buffers with the directory path
-	result = cgltf_load_buffers(&options, data, dir_path);
-
-	if (result != cgltf_result_success)
+	if (cgltf_load_buffers(&options, data, dir_path) != cgltf_result_success)
 	{
 		fprintf(stderr, "Failed to load GLTF buffers\n");
 		free(dir_path);
 		cgltf_free(data);
 		exit(1);
 	}
-
-	// Check if model has meshes
-	if (data->meshes_count == 0 || data->meshes[0].primitives_count == 0)
+	checkMaterials(data);
+	// -------------------------
+	// Count vertices and indices first
+	size_t totalVertices = 0, totalIndices = 0;
+	for (cgltf_size i = 0; i < data->meshes_count; ++i)
 	{
-		fprintf(stderr, "GLTF file has no meshes or primitives\n");
-		free(dir_path);
-		cgltf_free(data);
-		exit(1);
-	}
-
-	cgltf_mesh* mesh = &data->meshes[0];
-	cgltf_primitive* primitive = &mesh->primitives[0];
-
-	// Get vertex count from the first attribute
-	if (primitive->attributes_count == 0)
-	{
-		fprintf(stderr, "GLTF primitive has no attributes\n");
-		free(dir_path);
-		cgltf_free(data);
-		exit(1);
-	}
-
-	outMesh->vertex_count = primitive->attributes[0].data->count;
-	outMesh->vertices = calloc(outMesh->vertex_count, sizeof(Vertex)); // Use calloc to initialize memory
-	if (!outMesh->vertices)
-	{
-		fprintf(stderr, "Memory allocation failed for vertices\n");
-		free(dir_path);
-		cgltf_free(data);
-		exit(1);
-	}
-
-	// Process attributes
-	for (cgltf_size i = 0; i < primitive->attributes_count; ++i)
-	{
-		cgltf_attribute* attribute = &primitive->attributes[i];
-		cgltf_accessor* accessor = attribute->data;
-
-		// Ensure accessor has a buffer view
-		if (!accessor->buffer_view || !accessor->buffer_view->buffer || !accessor->buffer_view->buffer->data)
+		cgltf_mesh* mesh = &data->meshes[i];
+		for (cgltf_size j = 0; j < mesh->primitives_count; ++j)
 		{
-			fprintf(stderr, "Invalid buffer data in GLTF file\n");
-			continue;
-		}
+			cgltf_primitive* prim = &mesh->primitives[j];
+			if (prim->attributes_count == 0) continue;
 
-		float* buffer = (float*)accessor->buffer_view->buffer->data +
-		                accessor->buffer_view->offset / sizeof(float) +
-		                accessor->offset / sizeof(float);
-
-		if (strcmp(attribute->name, "POSITION") == 0)
-		{
-			for (cgltf_size j = 0; j < accessor->count && j < outMesh->vertex_count; ++j)
-			{
-				memcpy(&outMesh->vertices[j].pos, buffer + j * 3, sizeof(vec3));
-			}
-		}
-		else if (strcmp(attribute->name, "NORMAL") == 0)
-		{
-			for (cgltf_size j = 0; j < accessor->count && j < outMesh->vertex_count; ++j)
-			{
-				memcpy(&outMesh->vertices[j].normal, buffer + j * 3, sizeof(vec3));
-			}
-		}
-		else if (strcmp(attribute->name, "TEXCOORD_0") == 0)
-		{
-			for (cgltf_size j = 0; j < accessor->count && j < outMesh->vertex_count; ++j)
-			{
-				memcpy(&outMesh->vertices[j].texcoord, buffer + j * 2, sizeof(vec2));
-			}
+			totalVertices += prim->attributes[0].data->count;
+			totalIndices += prim->indices ? prim->indices->count : prim->attributes[0].data->count;
 		}
 	}
 
-	// Process indices
-	if (primitive->indices)
-	{
-		outMesh->index_count = primitive->indices->count;
-		outMesh->indices = malloc(sizeof(u32) * (outMesh->index_count));
-		if (!outMesh->indices)
-		{
-			fprintf(stderr, "Memory allocation failed for indices\n");
-			free(outMesh->vertices);
-			outMesh->vertices = NULL;
-			free(dir_path);
-			cgltf_free(data);
-			exit(1);
-		}
+	outMesh->vertex_count = totalVertices;
+	outMesh->index_count = totalIndices;
+	outMesh->vertices = calloc(totalVertices, sizeof(Vertex));
+	outMesh->indices = malloc(totalIndices * sizeof(u32));
 
-		for (cgltf_size i = 0; i < primitive->indices->count; ++i)
-		{
-			(outMesh->indices)[i] = cgltf_accessor_read_index(primitive->indices, i);
-		}
-	}
-	else
-	{
-		// No indices provided, create sequential indices
-		outMesh->index_count = outMesh->vertex_count;
-		outMesh->indices = malloc(sizeof(u32) * (outMesh->index_count));
-		if (!outMesh->indices)
-		{
-			fprintf(stderr, "Memory allocation failed for indices\n");
-			free(outMesh->vertices);
-			outMesh->vertices = NULL;
-			free(dir_path);
-			cgltf_free(data);
-			exit(1);
-		}
+	uint32_t vertexOffset = 0;
+	uint32_t indexOffset = 0;
+	mat4 identity;
+	glm_mat4_identity(identity);
 
-		for (u32 i = 0; i < outMesh->index_count; ++i)
-		{
-			(outMesh->indices)[i] = i;
-		}
+	for (cgltf_size i = 0; i < data->scenes[0].nodes_count; ++i)
+	{
+		processNode(data->scenes[0].nodes[i], outMesh, data, identity, NULL, &vertexOffset, &indexOffset);
 	}
 
-	// Extract texture information
-	outMesh->texture_path = NULL;
-	if (primitive->material && primitive->material->pbr_metallic_roughness.base_color_texture.texture)
-	{
-		cgltf_texture* texture = primitive->material->pbr_metallic_roughness.base_color_texture.texture;
-		if (texture->image && texture->image->uri)
-		{
-			// Construct full path to texture
-			size_t dir_len = strlen(dir_path);
-			size_t uri_len = strlen(texture->image->uri);
-			outMesh->texture_path = malloc(dir_len + uri_len + 1);
-			if (outMesh->texture_path)
-			{
-				strcpy(outMesh->texture_path, dir_path);
-				strcat(outMesh->texture_path, texture->image->uri);
-				printf("Found texture: %s\n", outMesh->texture_path);
-			}
-		}
-	}
-
-	// If no texture found in glTF, use default
-	if (!outMesh->texture_path)
-	{
-		outMesh->texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
-		strcpy(outMesh->texture_path, "Bark_DeadTree.png");
-		printf("No texture in glTF, using default: %s\n", outMesh->texture_path);
-	}
+	// Texture (same as before, placeholder only)
+	outMesh->texture_path = malloc(strlen("Bark_DeadTree.png") + 1);
+	strcpy(outMesh->texture_path, "Bark_DeadTree.png");
 
 	free(dir_path);
 	cgltf_free(data);
@@ -834,28 +936,48 @@ u32 selectmemorytype(
 	return 0;
 }
 
-void createBuffer(Application* app, Buffer* buffer, size_t size, VkBufferUsageFlags usage)
+void createBuffer(Application* app, Buffer* buffer, VkDeviceSize size, VkBufferUsageFlags usage)
 {
-	VkBufferCreateInfo bufferInfo = {
-	    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-	    .size = size,
-	    .usage = usage,
-	    .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
-	VK_CHECK(vkCreateBuffer(app->device, &bufferInfo, NULL, &buffer->vkbuffer));
-	VkMemoryRequirements memRequirements;
-	vkGetBufferMemoryRequirements(app->device, buffer->vkbuffer, &memRequirements);
+    buffer->size = size;
+
+    // 1. Create buffer
+    VkBufferCreateInfo bufferInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VK_CHECK(vkCreateBuffer(app->device, &bufferInfo, NULL, &buffer->vkbuffer));
+
+    // 2. Get memory requirements
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(app->device, buffer->vkbuffer, &memRequirements);
+
+    // 3. Find memory type and allocate
+	VkMemoryPropertyFlags desiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	uint32_t memoryTypeIndex = findMemoryType(&app->memoryProperties, memRequirements.memoryTypeBits, desiredFlags);
 	VkMemoryAllocateInfo allocInfo = {
-	    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-	    .allocationSize = memRequirements.size,
-	    .memoryTypeIndex = selectmemorytype(
-	        &app->memoryProperties, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = NULL,
+		.allocationSize = bufferInfo.size,
+	};
+	allocInfo.memoryTypeIndex = memoryTypeIndex;
+	
+	
+	
 	VK_CHECK(vkAllocateMemory(app->device, &allocInfo, NULL, &buffer->memory));
 	VK_CHECK(vkBindBufferMemory(app->device, buffer->vkbuffer, buffer->memory, 0));
-
-	VK_CHECK(vkMapMemory(app->device, buffer->memory, 0, size, 0, &buffer->data));
-
-	buffer->size = size;
+	
+	// Now check property flags before mapping
+	if (desiredFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+	{
+		VK_CHECK(vkMapMemory(app->device, buffer->memory, 0, size, 0, &buffer->data));
+	}
+	
 }
+
+
+
 void destroyBuffer(VkDevice device, Buffer* buffer)
 {
 	if (buffer->data)
@@ -1084,6 +1206,18 @@ VkDescriptorSetLayout createDescriptorSetLayout(VkDevice device)
 	        .descriptorCount = 1,
 	        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 	    },
+	    {
+	        .binding = 3,
+	        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+	        .descriptorCount = 1,
+	        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+	    },
+	    {
+	        .binding = 4,
+	        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+	        .descriptorCount = 1,
+	        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+	    },
 	};
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -1115,11 +1249,35 @@ VkDescriptorSetLayout createGridDescriptorSetLayout(VkDevice device)
 	    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 	};
 
-	VkDescriptorSetLayoutBinding bindings[] = {uboLayoutBinding, samplerLayoutBinding};
+	VkDescriptorSetLayoutBinding baseColorBinding = {
+		.binding = 3,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.pImmutableSamplers = NULL
+	};
+	
+	VkDescriptorSetLayoutBinding hasTextureBinding = {
+		.binding = 4,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.pImmutableSamplers = NULL
+	};
+	
+	// include all 4 bindings
+	VkDescriptorSetLayoutBinding bindings[] = {
+		uboLayoutBinding,
+		samplerLayoutBinding,
+		baseColorBinding,
+		hasTextureBinding
+	};
+	
 	VkDescriptorSetLayoutCreateInfo layoutInfo = {
 	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-	    .bindingCount = 2,
-	    .pBindings = bindings,
+	    .bindingCount = ARRAYSIZE(bindings),
+        .pBindings = bindings,
+
 	};
 
 	VkDescriptorSetLayout descriptorSetLayout;
@@ -1130,7 +1288,7 @@ VkDescriptorSetLayout createGridDescriptorSetLayout(VkDevice device)
 VkDescriptorPool createDescriptorPool(VkDevice device)
 {
 	VkDescriptorPoolSize poolSizes[] = {
-	    {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1},
+	    {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 3},
 	    {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 2}, // Changed to 2 for main texture + grid texture
 	};
 
@@ -1374,16 +1532,18 @@ VkPipeline createGraphicsPipeline(Application* app, VkShaderModule vertShader, V
 	};
 
 	VkVertexInputAttributeDescription attributes[] = {
-	    {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos)},
-	    {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
-	    {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texcoord)},
+		{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, pos) },
+		{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal) },
+		{ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, texcoord) },
+		{ .location = 3, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(Vertex, color) }, // ✅
 	};
+	
 
 	VkPipelineVertexInputStateCreateInfo vertexInput = {
 	    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 	    .vertexBindingDescriptionCount = 1,
 	    .pVertexBindingDescriptions = &bindingDesc,
-	    .vertexAttributeDescriptionCount = 3,
+	    .vertexAttributeDescriptionCount = 4,
 	    .pVertexAttributeDescriptions = attributes,
 	};
 
@@ -1600,7 +1760,7 @@ void createSwapchainRelatedResources(Application* app)
 void createModelAndBuffers(Application* app)
 {
 	// Load model
-	loadGltfModel("DeadTree_2.gltf", &app->mesh);
+	loadGltfModel("cookiie.gltf", &app->mesh);
 
 	// Create vertex buffer
 	size_t vertexBufferSize = app->mesh.vertex_count * sizeof(Vertex);
@@ -1674,7 +1834,14 @@ void createTextureResources(Application* app)
 void createUniformBuffer(Application* app)
 {
 	createBuffer(app, &app->uniformBuffer, sizeof(UniformBufferObject), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+	createBuffer(app, &app->baseColorBuffer, sizeof(vec4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    createBuffer(app, &app->hasTextureBuffer, sizeof(int), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+
 }
+
+
+
+
 
 void createDescriptors(Application* app)
 {
@@ -1686,13 +1853,45 @@ void createDescriptors(Application* app)
 	VkDescriptorBufferInfo bufferInfo = {.buffer = app->uniformBuffer.vkbuffer, .offset = 0, .range = sizeof(UniformBufferObject)};
 	VkDescriptorImageInfo imageInfo = {.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = app->texture.view, .sampler = app->texture.sampler};
 	VkDescriptorImageInfo gridImageInfo = {.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = app->gridTexture.view, .sampler = app->gridTexture.sampler};
+	VkDescriptorBufferInfo baseColorBufferInfo = {
+		.buffer = app->baseColorBuffer.vkbuffer,
+		.offset = 0,
+		.range = sizeof(vec4)
+	};
+	
+	VkDescriptorBufferInfo hasTextureBufferInfo = {
+		.buffer = app->hasTextureBuffer.vkbuffer,
+		.offset = 0,
+		.range = sizeof(int)
+	};
+	
 
-	VkWriteDescriptorSet descriptorWrites[] = {
+		VkWriteDescriptorSet descriptorWrites[] = {
 	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSet, .dstBinding = 0, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .pBufferInfo = &bufferInfo},
 	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSet, .dstBinding = 1, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &imageInfo},
 	    {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = app->descriptorSet, .dstBinding = 2, .dstArrayElement = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &gridImageInfo},
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = app->descriptorSet,
+			.dstBinding = 3,
+			.dstArrayElement = 0,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.pBufferInfo = &baseColorBufferInfo
+		},
+		// New: hasTextureBinding (binding = 4)
+		{
+			.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			.dstSet = app->descriptorSet,
+			.dstBinding = 4,
+			.dstArrayElement = 0,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.pBufferInfo = &hasTextureBufferInfo
+		}
 	};
-	vkUpdateDescriptorSets(app->device, 3, descriptorWrites, 0, NULL); // Changed to 3 descriptor writes
+	vkUpdateDescriptorSets(app->device, 5, descriptorWrites, 0, NULL);
+
 }
 
 void createSyncObjects(Application* app)
@@ -1792,7 +1991,10 @@ void createResources(Application* app)
 	createTextureSampler(app, &app->gridTexture, app->mipLevels);
 	
 	createUniformBuffer(app);
+    updateBaseColorAndHasTexture(app);
+
 	createDescriptors(app);
+	
 }
 
 // --- Vulkan Cleanup Helpers ---
