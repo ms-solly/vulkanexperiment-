@@ -1,3 +1,6 @@
 {
-    "cmake.sourceDirectory": "/home/lka/myprojects/vulkantest10/external/cglm"
+    "cmake.sourceDirectory": "/home/lka/myprojects/vulkantest10/external/cglm",
+    "files.associations": {
+        "glfw3.h": "c"
+    }
 }

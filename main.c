@@ -1,8 +1,8 @@
 #include <assert.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
+// #include <stdbool.h>
+// #include <stdint.h>
+// #include <stdio.h>
+// #include <stdlib.h>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #define STB_DS_IMPLEMENTATION
@@ -27,11 +27,10 @@
 
 #include "external/cglm/include/cglm/cglm.h"
 
-// Nuklear GUI includes
-
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+// Nuklear GUI includes
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
 #define NK_INCLUDE_STANDARD_VARARGS
@@ -41,6 +40,7 @@
 #define NK_INCLUDE_DEFAULT_FONT
 #define NK_IMPLEMENTATION
 #define NK_GLFW_VULKAN_IMPLEMENTATION
+#define NK_ZERO_COMMAND_MEMORY // avoids drawing frames when ntg on screen changes
 
 #include "external/nuklear/nuklear.h"
 
@@ -129,8 +129,52 @@ typedef struct Mesh
 	uint32_t index_count;
 	char* texture_path;
 } Mesh;
+// -------- nuklear context struct -----------
+typedef struct NuklearContext{
+	struct nk_context *n_ctx;
+	struct nk_font_atlas *n_atlas;
 
-#define MAX_FRAMES_IN_FLIGHT 2
+	VkPipeline n_pipeline;             // ui rendering 
+	VkPipelineLayout n_pipeline_layout;
+
+	VkDescriptorSet n_descriptor_set;  // font texture
+	VkDescriptorPool n_descriptor_pool;// font texture descriptor
+	VkDescriptorSetLayout n_descriptor_set_layout; // font texture descriptor set layout
+	VkSampler n_font_sampler;
+	VkDeviceMemory n_font_memory;
+
+	VkImage n_font_image;
+	VkImageView n_font_image_view;
+
+	VkCommandBuffer n_command_buffer;  // ui command buffer
+	Buffer n_vertex_buffer;            // ui vertices
+	Buffer n_index_buffer;             // ui indices
+
+	struct nk_buffer cmds;             // draw command buffer
+} NuklearContext;
+
+struct nk_draw_vertex {
+    float position[2];
+    float uv[2];
+    nk_byte col[4];
+};
+#ifndef NK_VERTEX_MAX  // sets max vertices in a draw call
+#define NK_VERTEX_MAX 65536
+#endif
+#ifndef NK_INDEX_MAX  // sets max indices in a draw call
+#define NK_INDEX_MAX 65536
+#endif
+#ifndef NK_ELEMENT_MAX // sets max elements in a draw call
+#define NK_ELEMENT_MAX 65536
+#endif
+
+static const struct nk_draw_vertex_layout_element nk_vertex_layout[] = {
+    {NK_VERTEX_POSITION, NK_FORMAT_FLOAT, NK_OFFSETOF(struct nk_draw_vertex, position)},
+    {NK_VERTEX_TEXCOORD, NK_FORMAT_FLOAT, NK_OFFSETOF(struct nk_draw_vertex, uv)},
+    {NK_VERTEX_COLOR, NK_FORMAT_R8G8B8A8, NK_OFFSETOF(struct nk_draw_vertex, col)},
+    {NK_VERTEX_LAYOUT_END}
+};
+#define MAX_FRAMES_IN_FLIGHT 3
 
 typedef struct Application
 {
@@ -150,6 +194,8 @@ typedef struct Application
 	float deltaTime;
 	float lastFrame;
 
+	// float lightIntensity; // UI brightness property
+
 	// Vulkan core
 	VkInstance instance;
 	VkPhysicalDevice physicalDevice;
@@ -168,6 +214,9 @@ typedef struct Application
 	VkImageView* swapchainImageViews;
 	uint32_t swapchainImageCount;
 	VkFramebuffer* framebuffers;
+	VkExtent2D swapChainImageExtent;
+
+
 
 	// Depth buffer
 	VkImage depthImage;
@@ -215,6 +264,9 @@ typedef struct Application
 	VkSemaphore renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT]; // Per frame in flight
 	VkFence inFlightFences[MAX_FRAMES_IN_FLIGHT];               // Per frame in flight
 	uint32_t currentFrame;
+
+	// nuklear gui 
+	NuklearContext NK;
 
 } Application;
 
@@ -285,6 +337,9 @@ void cleanupPipeline(Application* app);
 void framebufferResizeCallback(GLFWwindow* window, int width, int height);
 void initWindow(Application* app);
 void initVulkan(Application* app);
+void init_nuklear(Application* app);
+void nuklear_render(Application* app);
+void nuklear_cleanup(Application* app);
 void mainLoop(Application* app);
 void cleanup(Application* app);
 int main(void);
@@ -292,6 +347,12 @@ int main(void);
 // --- Input Handling ---
 void processInput(Application* app);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
+
+// --- gui helpers ---
+void createNuklearVulkanResources(Application* app);
+void initNuklear(Application* app);
+void renderNuklearUI(Application* app);
+void cleanupNuklear(Application* app);
 
 // --- Command Buffer Helpers ---
 
@@ -1022,7 +1083,7 @@ VkPhysicalDevice selectPhysicalDevice(VkInstance instance)
 	printf("Max Texture Size: %d x %d\n", 
 		props.limits.maxImageDimension2D, 
 		props.limits.maxImageDimension2D);
-	printf("Max Uniform Buffer Size: %zu MB\n", 
+	printf("Max Uniform Buffer Size: %u MB\n", 
 		props.limits.maxUniformBufferRange / (1024 * 1024));
 	printf("====================\n\n");
 
@@ -1721,7 +1782,7 @@ void createDescriptors(Application* app)
 	// Create descriptor pool and set
 	app->descriptorPool = createDescriptorPool(app->device);
 	app->descriptorSet = allocateDescriptorSet(app->device, app->descriptorPool, app->descriptorSetLayout);
-
+	
 	// Update descriptor set
 	VkDescriptorBufferInfo bufferInfo = {.buffer = app->uniformBuffer.vkbuffer, .offset = 0, .range = sizeof(UniformBufferObject)};
 	VkDescriptorImageInfo imageInfo = {.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = app->texture.view, .sampler = app->texture.sampler};
@@ -1753,8 +1814,8 @@ void createSyncObjects(Application* app)
 		VK_CHECK(vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->imageAvailableSemaphores[i]));
 	}
 
-	// Create renderFinished semaphores (per swapchain image)
-	for (uint32_t i = 0; i < app->swapchainImageCount; i++)
+	// Create renderFinished semaphores (per frame in flight)
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		VK_CHECK(vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphores[i]));
 	}
@@ -1844,8 +1905,8 @@ void cleanupSyncObjects(Application* app)
 	{
 		vkDestroySemaphore(app->device, app->imageAvailableSemaphores[i], NULL);
 	}
-	// Clean up renderFinished semaphores (per swapchain image)
-	for (uint32_t i = 0; i < app->swapchainImageCount; i++)
+	// Clean up renderFinished semaphores (per frame in flight)
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
 	}
@@ -1896,6 +1957,160 @@ void cleanupPipeline(Application* app)
 	vkDestroyDescriptorSetLayout(app->device, app->descriptorSetLayout, NULL);
 }
 
+// ----- gui initialization -----
+void initNuklear(Application* app) {
+    NuklearContext* NK = &app->NK;
+    
+    // 1. Create core context
+    NK->n_ctx = nk_glfw3_init(
+        app->window,                    // GLFWwindow *win
+        app->device,                    // VkDevice logical_device  
+        app->physicalDevice,            // VkPhysicalDevice physical_device
+        find_graphics_queue_family_index(app->physicalDevice), // uint32_t graphics_queue_family_index
+        app->swapchainImageViews,       // VkImageView *image_views
+        app->swapchainImageCount,       // uint32_t image_views_len
+        app->swapchainFormat,           // VkFormat color_format
+        NK_GLFW3_INSTALL_CALLBACKS,    // enum nk_glfw_init_state init_state
+        NK_VERTEX_MAX,        // VkDeviceSize max_vertex_buffer (1MB)
+        NK_ELEMENT_MAX        // VkDeviceSize max_element_buffer (512KB)
+    );    
+    // 2. Initialize font atlas
+    nk_glfw3_font_stash_begin(&NK->n_atlas);
+    struct nk_font *droid = nk_font_atlas_add_from_file(
+        NK->n_atlas, "DroidSans.ttf", 16, 0);
+	nk_glfw3_font_stash_end(&NK->n_atlas);
+    
+    // 3. Create Vulkan resources
+    createNuklearVulkanResources(app);
+}
+// ----- gui resource creation -----------
+void createNuklearVulkanResources(Application* app) {
+    NuklearContext* NK = &app->NK;
+
+    // Create font texture
+    VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    // ... setup for font texture ...
+    vkCreateImage(app->device, &image_info, NULL, &NK->n_font_image);
+    
+    // Create sampler
+    VkSamplerCreateInfo sampler_info = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    // ... linear filtering, no mipmaps ...
+    vkCreateSampler(app->device, &sampler_info, NULL, &NK->n_font_sampler);
+    
+    // Create descriptor set
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = NK->n_descriptor_pool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &NK->n_descriptor_set_layout
+    };
+    vkAllocateDescriptorSets(app->device, &alloc_info, &NK->n_descriptor_set);
+
+    // Create UI pipeline
+    VkGraphicsPipelineCreateInfo pipeline_info = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    // ... setup for 2D UI rendering ...
+    vkCreateGraphicsPipelines(app->device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &NK->n_pipeline);
+    
+    // Create buffers
+    createBuffer(app, &NK->n_vertex_buffer, NK_VERTEX_MAX * sizeof( struct nk_draw_vertex),
+                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    createBuffer(app, &NK->n_index_buffer, NK_INDEX_MAX * sizeof(uint32_t),
+                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+}
+
+
+// -------- gui renderer func-----------
+void renderNuklearUI(Application* app) {
+    NuklearContext* NK = &app->NK;
+
+    // Convert UI to draw commands
+    struct nk_buffer vbuf, ibuf;
+    nk_buffer_init_fixed(&vbuf, NK->n_vertex_buffer.data, NK_VERTEX_MAX * sizeof( nk_draw_vertex));
+    nk_buffer_init_fixed(&ibuf, NK->n_index_buffer.data, NK_INDEX_MAX * sizeof(nk_draw_index));
+    
+    struct nk_convert_config config = {
+        .vertex_layout = nk_vertex_layout,
+        .vertex_size = sizeof(struct nk_draw_vertex),
+        .vertex_alignment = NK_ALIGNOF(struct nk_draw_vertex),
+        .circle_segment_count = 22,
+        .curve_segment_count = 22,
+        .arc_segment_count = 22,
+        .global_alpha = 1.0f,
+        .shape_AA = NK_ANTI_ALIASING_ON,
+        .line_AA = NK_ANTI_ALIASING_ON,
+    };
+    nk_convert(NK->n_ctx, &NK->cmds, &vbuf, &ibuf, &config);
+    
+    // Record Vulkan commands
+    VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(NK->n_command_buffer, &begin_info);
+    
+    // Bind UI pipeline
+    vkCmdBindPipeline(NK->n_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, NK->n_pipeline);
+    
+    // Draw commands
+    const struct nk_draw_command* cmd;
+    uint32_t index_offset = 0;
+    nk_draw_foreach(cmd, NK->n_ctx, &NK->cmds) {
+        if (!cmd->elem_count) continue;
+
+        vkCmdBindDescriptorSets(NK->n_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               NK->n_pipeline_layout, 0, 1, &NK->n_descriptor_set, 0, NULL);
+
+        // Use manually tracked index_offset instead of cmd->first_index
+        vkCmdDrawIndexed(NK->n_command_buffer, cmd->elem_count, 1,
+                         index_offset, 0, 0);
+        
+        // Advance the index offset for next draw command
+        index_offset += cmd->elem_count;
+    }
+
+    vkEndCommandBuffer(NK->n_command_buffer);
+    
+    // Submit to queue
+    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &NK->n_command_buffer;
+    vkQueueSubmit(app->graphicsQueue, 1, &submit_info, VK_NULL_HANDLE);
+}
+// ---------- gui cleanup ----------
+void cleanupNuklear(Application* app) {
+    NuklearContext* NK = &app->NK;
+    
+    // 1. Destroy Vulkan resources
+    vkDestroyPipeline(app->device, NK->n_pipeline, NULL);
+    vkDestroyPipelineLayout(app->device, NK->n_pipeline_layout, NULL);
+    vkDestroyDescriptorPool(app->device, NK->n_descriptor_pool, NULL);
+    vkDestroyDescriptorSetLayout(app->device, NK->n_descriptor_set_layout, NULL);
+
+    // 2. Destroy texture resources
+    vkDestroySampler(app->device, NK->n_font_sampler, NULL);
+    vkDestroyImageView(app->device, NK->n_font_image_view, NULL);
+    vkDestroyImage(app->device, NK->n_font_image, NULL);
+    vkFreeMemory(app->device, NK->n_font_memory, NULL);
+
+    // 3. Destroy buffers
+    destroyBuffer(app->device, &NK->n_vertex_buffer);
+    destroyBuffer(app->device, &NK->n_index_buffer);
+    
+    // 4. Free command buffer (if allocated separately)
+    if (NK->n_command_buffer) {
+        vkFreeCommandBuffers(app->device, app->commandPool, 1, &NK->n_command_buffer);
+    }
+    
+    // 5. Cleanup Nuklear core resources
+    if (NK->n_atlas) {
+        nk_font_atlas_clear(NK->n_atlas);
+    }
+
+    if (NK->n_ctx) {
+        nk_free(NK->n_ctx);
+        nk_glfw3_shutdown();
+    }
+    
+    // 6. Zero out the struct for safety
+    memset(NK, 0, sizeof(NuklearContext));
+}
 // --- Main Application ---
 
 void framebufferResizeCallback(GLFWwindow* window, int width, int height)
@@ -2140,6 +2355,18 @@ void mainLoop(Application* app)
 {
 	while (!glfwWindowShouldClose(app->window))
 	{
+		// nk_glfw3_new_frame();
+		// // Build UI
+		// if (nk_begin(app->NK.n_ctx, "Control Panel", nk_rect(10, 10, 300, 400),
+	    //    NK_WINDOW_BORDER|NK_WINDOW_MOVABLE)){
+		// 	nk_layout_row_static(app->NK.n_ctx, 30, 100, 1);
+		// 	if (nk_button_label(app->NK.n_ctx, "Spawn Object")) {
+		// 		// Handle button click
+		// 	}
+		// 	nk_layout_row_dynamic(app->NK.n_ctx, 20, 1);
+		// 	nk_property_float(app->NK.n_ctx, "Brightness", 0.0f, &app->PointLight.intensity, 1.0f, 0.1f, 0.01f);
+		// }
+		// nk_end(app->NK.n_ctx);
 		float currentFrame = glfwGetTime();
 		app->deltaTime = currentFrame - app->lastFrame;
 		app->lastFrame = currentFrame;
@@ -2148,6 +2375,8 @@ void mainLoop(Application* app)
 		processInput(app);
 		updateLights(app);
 		drawFrame(app);
+		// renderNuklearUI(app);
+
 	}
 
 	vkDeviceWaitIdle(app->device);
@@ -2207,7 +2436,7 @@ void cleanup(Application* app)
 	cleanupResources(app);
 	cleanupPipeline(app);
 	cleanupSwapchain(app);
-
+	// cleanupNuklear(app);
 	vkDestroySurfaceKHR(app->instance, app->surface, NULL);
 	free(app->commandBuffers);
 	vkDestroyCommandPool(app->device, app->commandPool, NULL);
