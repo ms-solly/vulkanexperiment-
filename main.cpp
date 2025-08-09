@@ -26,7 +26,7 @@
 #include "external/volk/volk.h"
 
 #include "external/cglm/include/cglm/cglm.h"
-//#include "external/tracy/public/tracy/TracyC.h"
+#include "external/tracy/public/tracy/TracyC.h"
 
 // Nuklear GUI includes
 
@@ -178,8 +178,6 @@ typedef struct Application
 	GLFWwindow* window;
 	int width, height;
 	bool framebufferResized;
-	VkDebugUtilsMessengerEXT DebugMessenger;
-
 
 	// Camera
 	vec3 cameraPos;
@@ -1248,7 +1246,7 @@ VkInstance createVulkanInstance(void)
 	};
 
 #ifdef _DEBUG
-	const char* debugLayers[] = {"VK_LAYER_KHRONOS_validation"," VK_EXT_DEBUG_REPORT_EXTENSION_NAME"};
+	const char* debugLayers[] = {"VK_LAYER_KHRONOS_validation"};
 	createInfo.ppEnabledLayerNames = debugLayers;
 	createInfo.enabledLayerCount = ARRAYSIZE(debugLayers);
 #endif
@@ -1267,7 +1265,9 @@ VkInstance createVulkanInstance(void)
 
 	u32 extensionCount = glfwExtensionCount;
 
-
+#ifndef NDEBUG
+	extensions[extensionCount++] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
+#endif
 
 	createInfo.ppEnabledExtensionNames = extensions;
 	createInfo.enabledExtensionCount = extensionCount;
@@ -1276,34 +1276,6 @@ VkInstance createVulkanInstance(void)
 	VK_CHECK(vkCreateInstance(&createInfo, NULL, &instance));
 	return instance;
 }
-
-VKAPI_ATTR VkBool32 VKAPI_CALL vulkan_debug_callback(
-	VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-	VkDebugUtilsMessageTypeFlagsEXT messageType,
-	const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-	void* pUserData)
-{
-	(void)messageSeverity;
-	(void)messageType;
-	(void)pUserData;
-	fprintf(stderr, "validation layer: %s\n", pCallbackData->pMessage);
-	return VK_FALSE;
-}
-
-void CreateDebugCallback(Application  *app)
-{
-	VkDebugUtilsMessengerCreateInfoEXT create_info = {
-		.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-		.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-						   VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-		.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-					   VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-					   VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-		.pfnUserCallback = vulkan_debug_callback,
-	};
-	VK_CHECK(vkCreateDebugUtilsMessengerEXT(app->instance, &create_info, NULL, &app->DebugMessenger));
-}
-
 VkPhysicalDevice selectPhysicalDevice(VkInstance instance)
 {
 	VkPhysicalDevice physicalDevices[8];
