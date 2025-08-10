@@ -1,4 +1,4 @@
-rm -f ./tri ./main.o 
+rm -f ./build/tri ./build/main.o 
 glslangValidator -V shaders/tri.vert.glsl -o shaders/tri.vert.spv
 glslangValidator -V shaders/grid.vert.glsl -o shaders/grid.vert.spv
 glslangValidator -V shaders/grid.frag.glsl -o shaders/grid.frag.spv
@@ -17,7 +17,7 @@ if [ ! -f build/tracy_client.o ]; then
 fi
 
 echo "Compiling main.c..."
-clang++ -c main.c -o build/main.o \
+clang -c main.c -o build/main.o \
     -Wpointer-arith -Wformat=2 -Wall -Wextra -Wshadow \
     -ggdb -pedantic \
     -D_DEBUG -DVK_USE_PLATFORM_WAYLAND_KHR -DTRACY_ENABLE

@@ -1246,7 +1246,7 @@ VkInstance createVulkanInstance(void)
 	};
 
 #ifdef _DEBUG
-	const char* debugLayers[] = {"VK_LAYER_KHRONOS_validation", " VK_EXT_DEBUG_REPORT_EXTENSION_NAME"};
+	const char* debugLayers[] = {"VK_LAYER_KHRONOS_validation"};
 	createInfo.ppEnabledLayerNames = debugLayers;
 	createInfo.enabledLayerCount = ARRAYSIZE(debugLayers);
 #endif
