@@ -26,7 +26,7 @@
 #include "external/volk/volk.h"
 
 #include "external/cglm/include/cglm/cglm.h"
-//#include "external/tracy/public/tracy/TracyC.h"
+// #include "external/tracy/public/tracy/TracyC.h"
 
 // Nuklear GUI includes
 
@@ -95,9 +95,9 @@ typedef struct Texture
 
 typedef struct Material
 {
-	vec4 base_color;    // Base color factor
-	int has_texture;    
-	int texture_index;  // Index into the textures array (-1 if no texture)
+	vec4 base_color; // Base color factor
+	int has_texture;
+	int texture_index; // Index into the textures array (-1 if no texture)
 	char* texture_path;
 } Material;
 
@@ -151,7 +151,6 @@ typedef struct Mesh
 	int has_texture;    // 1 if texture used, else 0
 } Mesh;
 
-
 typedef struct GrassInstance
 {
 	vec3 position; // World position
@@ -179,7 +178,6 @@ typedef struct Application
 	int width, height;
 	bool framebufferResized;
 	VkDebugUtilsMessengerEXT DebugMessenger;
-
 
 	// Camera
 	vec3 cameraPos;
@@ -1248,7 +1246,7 @@ VkInstance createVulkanInstance(void)
 	};
 
 #ifdef _DEBUG
-	const char* debugLayers[] = {"VK_LAYER_KHRONOS_validation"," VK_EXT_DEBUG_REPORT_EXTENSION_NAME"};
+	const char* debugLayers[] = {"VK_LAYER_KHRONOS_validation", " VK_EXT_DEBUG_REPORT_EXTENSION_NAME"};
 	createInfo.ppEnabledLayerNames = debugLayers;
 	createInfo.enabledLayerCount = ARRAYSIZE(debugLayers);
 #endif
@@ -1267,8 +1265,6 @@ VkInstance createVulkanInstance(void)
 
 	u32 extensionCount = glfwExtensionCount;
 
-
-
 	createInfo.ppEnabledExtensionNames = extensions;
 	createInfo.enabledExtensionCount = extensionCount;
 
@@ -1278,10 +1274,10 @@ VkInstance createVulkanInstance(void)
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL vulkan_debug_callback(
-	VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-	VkDebugUtilsMessageTypeFlagsEXT messageType,
-	const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-	void* pUserData)
+    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageType,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+    void* pUserData)
 {
 	(void)messageSeverity;
 	(void)messageType;
@@ -1290,17 +1286,20 @@ VKAPI_ATTR VkBool32 VKAPI_CALL vulkan_debug_callback(
 	return VK_FALSE;
 }
 
-void CreateDebugCallback(Application  *app)
+void CreateDebugCallback(Application* app)
 {
 	VkDebugUtilsMessengerCreateInfoEXT create_info = {
-		.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-		.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-						   VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-		.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-					   VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-					   VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-		.pfnUserCallback = vulkan_debug_callback,
+	    .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+	    .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+	                       VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+	                       VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+	                       VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+	    .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+	                   VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+	                   VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+	    .pfnUserCallback = vulkan_debug_callback,
 	};
+
 	VK_CHECK(vkCreateDebugUtilsMessengerEXT(app->instance, &create_info, NULL, &app->DebugMessenger));
 }
 
@@ -2348,25 +2347,28 @@ void createSyncObjects(Application* app)
 
 // --- Vulkan Initialization Helpers ---
 
-void createCommandPoolAndBuffer(Application* app, u32 queueFamilyIndex)
+void createCommandPool(VkDevice device, u32 queueFamilyIndex, VkCommandPool* outCommandPool)
 {
 	// Create command pool
 	VkCommandPoolCreateInfo commandPoolInfo = {
-	    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-	    .queueFamilyIndex = queueFamilyIndex,
-	    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+		.queueFamilyIndex = queueFamilyIndex,
+		.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
 	};
-	VK_CHECK(vkCreateCommandPool(app->device, &commandPoolInfo, NULL, &app->commandPool));
+	VK_CHECK(vkCreateCommandPool(device, &commandPoolInfo, NULL, outCommandPool));
+}
 
+void allocateFrameCommandBuffers(VkDevice device, VkCommandPool commandPool, VkCommandBuffer** outCommandBuffers)
+{
 	// Allocate command buffers (one per frame in flight)
-	app->commandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
+	*outCommandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
 	VkCommandBufferAllocateInfo cmdAllocInfo = {
-	    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-	    .commandPool = app->commandPool,
-	    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-	    .commandBufferCount = MAX_FRAMES_IN_FLIGHT,
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.commandPool = commandPool,
+		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		.commandBufferCount = MAX_FRAMES_IN_FLIGHT,
 	};
-	VK_CHECK(vkAllocateCommandBuffers(app->device, &cmdAllocInfo, app->commandBuffers));
+	VK_CHECK(vkAllocateCommandBuffers(device, &cmdAllocInfo, *outCommandBuffers));
 }
 
 void createPipeline(Application* app)
@@ -2608,7 +2610,8 @@ void initVulkan(Application* app)
 	volkLoadDevice(app->device);
 	vkGetDeviceQueue(app->device, queueFamilyIndex, 0, &app->graphicsQueue);
 
-	createCommandPoolAndBuffer(app, queueFamilyIndex);
+	createCommandPool(app->device, queueFamilyIndex, &app->commandPool);
+	allocateFrameCommandBuffers(app->device, app->commandPool, &app->commandBuffers);
 
 	// Create surface
 	app->surface = createSurface(app->instance, app->window);
