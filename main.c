@@ -1,3 +1,4 @@
+
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -32,17 +33,6 @@
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
-
-#define NK_INCLUDE_FIXED_TYPES
-#define NK_INCLUDE_STANDARD_IO
-#define NK_INCLUDE_STANDARD_VARARGS
-#define NK_INCLUDE_DEFAULT_ALLOCATOR
-#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
-#define NK_INCLUDE_FONT_BAKING
-#define NK_INCLUDE_DEFAULT_FONT
-#define NK_IMPLEMENTATION
-#define NK_GLFW_VULKAN_IMPLEMENTATION
-
 #include "external/nuklear/nuklear.h"
 
 #include "external/nuklear/demo/glfw_vulkan/nuklear_glfw_vulkan.h"
@@ -66,6 +56,19 @@
 #ifndef ARRAYSIZE
 #define ARRAYSIZE(array) (sizeof(array) / sizeof((array)[0]))
 #endif
+
+// --- Helper Functions ---
+
+VkSemaphore createSemaphore(VkDevice device)
+{
+	VkSemaphoreCreateInfo semaphoreInfo = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+	};
+	
+	VkSemaphore semaphore;
+	VK_CHECK(vkCreateSemaphore(device, &semaphoreInfo, NULL, &semaphore));
+	return semaphore;
+}
 
 // --- Core Structures ---
 
@@ -269,7 +272,7 @@ typedef struct Application
 	// Sync objects
 
 	VkSemaphore imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT]; // Per frame in flight
-	VkSemaphore renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT]; // Per frame in flight
+	VkSemaphore* renderFinishedSemaphores; // Per swapchain image (dynamically allocated)
 	VkFence inFlightFences[MAX_FRAMES_IN_FLIGHT];               // Per frame in flight
 	u32 currentFrame;
 
@@ -325,10 +328,12 @@ VkPipeline createGridPipeline(Application* app, VkShaderModule vertShader, VkSha
 VkPipeline createGrassPipeline(Application* app, VkShaderModule vertShader, VkShaderModule fragShader);
 void createSwapchainRelatedResources(Application* app);
 void createModelAndBuffers(Application* app);
+VkSemaphore createSemaphore(VkDevice device);
 void createTextureResources(Application* app);
 void createUniformBuffer(Application* app);
 void createDescriptors(Application* app);
 void createSyncObjects(Application* app);
+
 void recordCommandBuffer(Application* app, VkCommandBuffer commandBuffer, u32 imageIndex);
 void updateLights(Application* app);
 
@@ -2128,6 +2133,13 @@ void createSwapchainRelatedResources(Application* app)
 
 	// Create framebuffers
 	createFramebuffers(app);
+
+	// Create renderFinished semaphores (per swapchain image)
+	app->renderFinishedSemaphores = malloc(app->swapchainImageCount * sizeof(VkSemaphore));
+	for (u32 i = 0; i < app->swapchainImageCount; i++)
+	{
+		app->renderFinishedSemaphores[i] = createSemaphore(app->device);
+	}
 }
 
 void createModelAndBuffers(Application* app)
@@ -2314,29 +2326,22 @@ void createDescriptors(Application* app)
 	app->descriptorSet = app->descriptorSets[0];
 }
 
+
+
 void createSyncObjects(Application* app)
 {
-	// // Allocate imageAvailable semaphores per frame in flight
-	// app->imageAvailableSemaphores = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkSemaphore));
-	// // Allocate renderFinished semaphores per swapchain image
-	// app->renderFinishedSemaphores = malloc(app->swapchainImageCount * sizeof(VkSemaphore));
-	// // Allocate fences per frame in flight
-	// app->inFlightFences = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkFence));
-
-	VkSemaphoreCreateInfo semaphoreInfo = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-	VkFenceCreateInfo fenceInfo = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+	VkFenceCreateInfo fenceInfo = {
+		.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, 
+		.flags = VK_FENCE_CREATE_SIGNALED_BIT
+	};
 
 	// Create imageAvailable semaphores (per frame in flight)
 	for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
-		VK_CHECK(vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->imageAvailableSemaphores[i]));
+		app->imageAvailableSemaphores[i] = createSemaphore(app->device);
 	}
 
-	// Create renderFinished semaphores (per swapchain image)
-	for (u32 i = 0; i < app->swapchainImageCount; i++)
-	{
-		VK_CHECK(vkCreateSemaphore(app->device, &semaphoreInfo, NULL, &app->renderFinishedSemaphores[i]));
-	}
+
 
 	// Create fences for each frame in flight
 	for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -2428,19 +2433,13 @@ void cleanupSyncObjects(Application* app)
 	{
 		vkDestroySemaphore(app->device, app->imageAvailableSemaphores[i], NULL);
 	}
-	// Clean up renderFinished semaphores (per swapchain image)
-	for (u32 i = 0; i < app->swapchainImageCount; i++)
-	{
-		vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
-	}
+	// renderFinished semaphores are now cleaned up in cleanupSwapchain()
 	// Clean up fences (per frame in flight)
 	for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 	{
 		vkDestroyFence(app->device, app->inFlightFences[i], NULL);
 	}
-	// free(app->renderFinishedSemaphores);
-	// free(app->imageAvailableSemaphores);
-	// free(app->inFlightFences);
+
 }
 
 void cleanupResources(Application* app)
@@ -2759,7 +2758,9 @@ void drawFrame(Application* app)
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR)
 	{
+
 		recreateSwapchain(app);
+		
 		return;
 	}
 	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
@@ -2781,14 +2782,14 @@ void drawFrame(Application* app)
 	    .commandBufferCount = 1,
 	    .pCommandBuffers = &commandBuffer,
 	    .signalSemaphoreCount = 1,
-	    .pSignalSemaphores = &app->renderFinishedSemaphores[app->currentFrame],
+	    .pSignalSemaphores = &app->renderFinishedSemaphores[imageIndex], // Use imageIndex, not currentFrame
 	};
 	VK_CHECK(vkQueueSubmit(app->graphicsQueue, 1, &submitInfo, app->inFlightFences[app->currentFrame]));
 
 	VkPresentInfoKHR presentInfo = {
 	    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 	    .waitSemaphoreCount = 1,
-	    .pWaitSemaphores = &app->renderFinishedSemaphores[app->currentFrame],
+	    .pWaitSemaphores = &app->renderFinishedSemaphores[imageIndex], // Use imageIndex, not currentFrame
 	    .swapchainCount = 1,
 	    .pSwapchains = &app->swapchain,
 	    .pImageIndices = &imageIndex,
@@ -2844,6 +2845,16 @@ void cleanupSwapchain(Application* app)
 	}
 	free(app->swapchainImageViews);
 	free(app->swapchainImages);
+
+	// Clean up renderFinished semaphores (they are tied to swapchain images)
+	if (app->renderFinishedSemaphores) {
+		for (u32 i = 0; i < app->swapchainImageCount; i++)
+		{
+			vkDestroySemaphore(app->device, app->renderFinishedSemaphores[i], NULL);
+		}
+		free(app->renderFinishedSemaphores);
+		app->renderFinishedSemaphores = NULL;
+	}
 
 	vkDestroyRenderPass(app->device, app->renderPass, NULL);
 	vkDestroySwapchainKHR(app->device, app->swapchain, NULL);

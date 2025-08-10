@@ -15,6 +15,13 @@ if [ ! -f build/tracy_client.o ]; then
     echo "Compiling TracyClient.cpp..."
     clang++ -c ./external/tracy/public/TracyClient.cpp -o build/tracy_client.o -DTRACY_ENABLE -std=c++11 -O3  -march=native -lpthread -ldl 
 fi
+if [ ! -f build/nuklear.o ]; then 
+    echo "Compiling nuklear.c..."
+    clang -c nuklear.c -o build/nuklear.o \
+        -Wpointer-arith -Wformat=2 -Wall -Wextra -Wshadow \
+        -ggdb -pedantic \
+        -D_DEBUG -DVK_USE_PLATFORM_WAYLAND_KHR -DTRACY_ENABLE
+fi
 
 echo "Compiling main.c..."
 clang -c main.c -o build/main.o \
@@ -23,7 +30,7 @@ clang -c main.c -o build/main.o \
     -D_DEBUG -DVK_USE_PLATFORM_WAYLAND_KHR -DTRACY_ENABLE
 
 echo "Linking..."
-clang++ build/main.o build/tracy_client.o -o build/tri \
+clang++ build/main.o build/tracy_client.o build/nuklear.o -o build/tri \
     -lvulkan -lm -lglfw -lpthread -ldl
 
 
