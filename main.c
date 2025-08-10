@@ -2351,9 +2351,9 @@ void createCommandPool(VkDevice device, u32 queueFamilyIndex, VkCommandPool* out
 {
 	// Create command pool
 	VkCommandPoolCreateInfo commandPoolInfo = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-		.queueFamilyIndex = queueFamilyIndex,
-		.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+	    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+	    .queueFamilyIndex = queueFamilyIndex,
+	    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
 	};
 	VK_CHECK(vkCreateCommandPool(device, &commandPoolInfo, NULL, outCommandPool));
 }
@@ -2363,10 +2363,10 @@ void allocateFrameCommandBuffers(VkDevice device, VkCommandPool commandPool, VkC
 	// Allocate command buffers (one per frame in flight)
 	*outCommandBuffers = malloc(MAX_FRAMES_IN_FLIGHT * sizeof(VkCommandBuffer));
 	VkCommandBufferAllocateInfo cmdAllocInfo = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-		.commandPool = commandPool,
-		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-		.commandBufferCount = MAX_FRAMES_IN_FLIGHT,
+	    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+	    .commandPool = commandPool,
+	    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+	    .commandBufferCount = MAX_FRAMES_IN_FLIGHT,
 	};
 	VK_CHECK(vkAllocateCommandBuffers(device, &cmdAllocInfo, *outCommandBuffers));
 }
